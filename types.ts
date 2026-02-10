@@ -33,10 +33,12 @@ export interface Highlight {
   rects: HighlightRect[];
   color: string; // hex code
   text?: string;
+  comment?: string; // Added for notes/annotations
 }
 
 export interface PaperData {
   id: string;
+  userId?: string; // Added for DB isolation
   file: File;
   fileName: string;
   fileSize: number;

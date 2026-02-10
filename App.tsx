@@ -9,6 +9,7 @@ import ComparisonModal from './components/ComparisonModal';
 import ImageModal from './components/ImageModal';
 import AuthPage from './components/AuthPage';
 import { analyzePaperWithGemini, comparePapersWithGemini } from './services/geminiService';
+import { savePaperToDB, getPapersFromDB, deletePaperFromDB } from './services/db';
 import { PaperData, AnalysisColumn, LLMSettings, DEFAULT_SETTINGS, ComparisonResult, Highlight } from './types';
 
 // Default column widths
@@ -28,7 +29,7 @@ const DEFAULT_WIDTHS: Record<string, number> = {
   screenshot: 180,
 };
 
-// Tag Color Palette - Pre-defined full class strings to ensure Tailwind picks them up
+// Tag Color Palette
 const TAG_COLORS = [
   { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', activeBg: 'bg-blue-100', hoverBg: 'hover:bg-blue-50' },
   { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', activeBg: 'bg-emerald-100', hoverBg: 'hover:bg-emerald-50' },
@@ -118,6 +119,19 @@ const App: React.FC = () => {
   // Resizing State
   const resizingRef = useRef<{ key: string; startX: number; startWidth: number } | null>(null);
 
+  // Load papers from DB on startup
+  useEffect(() => {
+    if (currentUser) {
+        getPapersFromDB(currentUser).then(storedPapers => {
+            // Sort by upload time descending
+            const sorted = storedPapers.sort((a, b) => b.uploadTime - a.uploadTime);
+            setPapers(sorted);
+        });
+    } else {
+        setPapers([]);
+    }
+  }, [currentUser]);
+
   // --- Auth Handlers ---
   const handleLogin = (username: string) => {
       setCurrentUser(username);
@@ -127,6 +141,7 @@ const App: React.FC = () => {
   const handleLogout = () => {
       setCurrentUser(null);
       localStorage.removeItem('paperScope_currentUser');
+      setPapers([]); // Clear local state
   };
 
   // --- Banner Handler ---
@@ -144,13 +159,11 @@ const App: React.FC = () => {
   };
 
   // --- Derived State for Tags ---
-  // Extract all unique tags from all papers
   const uniqueTags = useMemo(() => {
       const allTags = papers.flatMap(p => p.tags || []);
       return Array.from(new Set(allTags)).sort();
   }, [papers]);
 
-  // Filter papers based on active tab
   const filteredPapers = useMemo(() => {
       if (activeTab === 'All') return papers;
       if (activeTab === 'Uncategorized') return papers.filter(p => !p.tags || p.tags.length === 0);
@@ -164,6 +177,8 @@ const App: React.FC = () => {
   };
 
   const handleFilesSelected = async (files: File[]) => {
+    if (!currentUser) return;
+
     let initialTags: string[] = [];
     if (activeTab !== 'All' && activeTab !== 'Uncategorized') {
         initialTags = [activeTab];
@@ -171,6 +186,7 @@ const App: React.FC = () => {
 
     const newPapers: PaperData[] = files.map((file) => ({
       id: uuidv4(),
+      userId: currentUser,
       file,
       fileName: file.name,
       fileSize: file.size,
@@ -181,7 +197,13 @@ const App: React.FC = () => {
       screenshots: [],
     }));
 
-    setPapers((prev) => [...prev, ...newPapers]);
+    // Optimistically update UI
+    setPapers((prev) => [...newPapers, ...prev]); // Add to top
+    
+    // Save to DB
+    newPapers.forEach(p => savePaperToDB(p));
+
+    // Start processing
     newPapers.forEach((paper) => processPaper(paper.id, paper.file, settings));
   };
 
@@ -192,23 +214,34 @@ const App: React.FC = () => {
 
     try {
       const result = await analyzePaperWithGemini(file, currentSettings);
-      setPapers((prev) =>
-        prev.map((p) =>
-          p.id === id ? { ...p, status: 'success', analysis: result } : p
-        )
-      );
+      
+      setPapers((prev) => {
+        return prev.map((p) => {
+            if (p.id === id) {
+                const updated = { ...p, status: 'success' as const, analysis: result };
+                savePaperToDB(updated); // Save success state to DB
+                return updated;
+            }
+            return p;
+        });
+      });
+
     } catch (error: any) {
-      setPapers((prev) =>
-        prev.map((p) =>
-          p.id === id
-            ? { ...p, status: 'error', errorMessage: error.message || 'Analysis failed' }
-            : p
-        )
-      );
+      setPapers((prev) => {
+          return prev.map((p) => {
+            if (p.id === id) {
+                const updated = { ...p, status: 'error' as const, errorMessage: error.message || 'Analysis failed' };
+                savePaperToDB(updated); // Save error state to DB
+                return updated;
+            }
+            return p;
+          });
+      });
     }
   };
 
   const deletePaper = (id: string) => {
+    deletePaperFromDB(id);
     setPapers((prev) => prev.filter((p) => p.id !== id));
     setSelectedPaperIds(prev => {
         const next = new Set(prev);
@@ -303,7 +336,14 @@ const App: React.FC = () => {
       
       const uniqueTags = Array.from(new Set(newTags));
 
-      setPapers(prev => prev.map(p => p.id === id ? { ...p, tags: uniqueTags } : p));
+      setPapers(prev => prev.map(p => {
+          if (p.id === id) {
+              const updated = { ...p, tags: uniqueTags };
+              savePaperToDB(updated);
+              return updated;
+          }
+          return p;
+      }));
       setEditingTagsId(null);
   };
 
@@ -313,7 +353,14 @@ const App: React.FC = () => {
       const reader = new FileReader();
       reader.onload = (e) => {
           const result = e.target?.result as string;
-          setPapers(prev => prev.map(p => p.id === id ? { ...p, screenshots: [...(p.screenshots || []), result] } : p));
+          setPapers(prev => prev.map(p => {
+              if (p.id === id) {
+                  const updated = { ...p, screenshots: [...(p.screenshots || []), result] };
+                  savePaperToDB(updated);
+                  return updated;
+              }
+              return p;
+          }));
       };
       reader.readAsDataURL(file);
   };
@@ -321,10 +368,12 @@ const App: React.FC = () => {
   const removeScreenshot = (paperId: string, indexToRemove: number) => {
       setPapers(prev => prev.map(p => {
           if (p.id !== paperId) return p;
-          return {
+          const updated = {
               ...p,
               screenshots: (p.screenshots || []).filter((_, idx) => idx !== indexToRemove)
           };
+          savePaperToDB(updated);
+          return updated;
       }));
   };
 
@@ -348,7 +397,9 @@ const App: React.FC = () => {
   const handleSavePaperUpdates = (paperId: string, highlights: Highlight[]) => {
       setPapers(prev => prev.map(p => {
           if (p.id === paperId) {
-              return { ...p, highlights };
+              const updated = { ...p, highlights };
+              savePaperToDB(updated);
+              return updated;
           }
           return p;
       }));
@@ -372,13 +423,15 @@ const App: React.FC = () => {
   const handleUpdateAnalysis = (newContent: string) => {
     setPapers(prev => prev.map(p => {
         if (p.id === activeModal.paperId && p.analysis) {
-            return {
+            const updated = {
                 ...p,
                 analysis: {
                     ...p.analysis,
                     [activeModal.fieldKey]: newContent
                 }
             };
+            savePaperToDB(updated);
+            return updated;
         }
         return p;
     }));
