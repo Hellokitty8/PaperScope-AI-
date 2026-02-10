@@ -20,6 +20,21 @@ export interface ComparisonResult {
   summary: string; // Brief overall comparison summary
 }
 
+export interface HighlightRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface Highlight {
+  id: string;
+  page: number;
+  rects: HighlightRect[];
+  color: string; // hex code
+  text?: string;
+}
+
 export interface PaperData {
   id: string;
   file: File;
@@ -29,8 +44,9 @@ export interface PaperData {
   status: 'idle' | 'analyzing' | 'success' | 'error';
   analysis: AnalysisResult | null;
   errorMessage?: string;
-  tags: string[]; // Changed from group to tags array
-  screenshots: string[]; // Changed from single screenshot to array
+  tags: string[]; 
+  screenshots: string[]; 
+  highlights?: Highlight[]; // Added for PDF highlighting
 }
 
 export interface LLMSettings {

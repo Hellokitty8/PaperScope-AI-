@@ -9,7 +9,7 @@ import ComparisonModal from './components/ComparisonModal';
 import ImageModal from './components/ImageModal';
 import AuthPage from './components/AuthPage';
 import { analyzePaperWithGemini, comparePapersWithGemini } from './services/geminiService';
-import { PaperData, AnalysisColumn, LLMSettings, DEFAULT_SETTINGS, ComparisonResult } from './types';
+import { PaperData, AnalysisColumn, LLMSettings, DEFAULT_SETTINGS, ComparisonResult, Highlight } from './types';
 
 // Default column widths
 const DEFAULT_WIDTHS: Record<string, number> = {
@@ -87,9 +87,9 @@ const App: React.FC = () => {
   });
 
   // PDF Viewer State
-  const [pdfViewer, setPdfViewer] = useState<{ isOpen: boolean; file: File | null }>({
+  const [pdfViewer, setPdfViewer] = useState<{ isOpen: boolean; paper: PaperData | null }>({
     isOpen: false,
-    file: null,
+    paper: null,
   });
 
   // Image Modal State
@@ -341,8 +341,17 @@ const App: React.FC = () => {
       }
   };
 
-  const openPdf = (file: File) => {
-    setPdfViewer({ isOpen: true, file });
+  const openPdf = (paper: PaperData) => {
+    setPdfViewer({ isOpen: true, paper });
+  };
+
+  const handleSavePaperUpdates = (paperId: string, highlights: Highlight[]) => {
+      setPapers(prev => prev.map(p => {
+          if (p.id === paperId) {
+              return { ...p, highlights };
+          }
+          return p;
+      }));
   };
 
   const openDetail = (paperId: string, fieldKey: string, title: string, content: string, type: AnalysisColumn) => {
@@ -719,7 +728,7 @@ const App: React.FC = () => {
                               <p 
                                 className="font-medium text-gray-900 hover:text-indigo-600 text-sm truncate w-full cursor-pointer transition-colors" 
                                 title="Click to view PDF"
-                                onClick={() => openPdf(paper.file)}
+                                onClick={() => openPdf(paper)}
                               >
                                 {paper.fileName}
                               </p>
@@ -919,8 +928,9 @@ const App: React.FC = () => {
       
       <PdfViewerModal 
         isOpen={pdfViewer.isOpen}
-        file={pdfViewer.file}
-        onClose={() => setPdfViewer({ isOpen: false, file: null })}
+        paper={pdfViewer.paper}
+        onClose={() => setPdfViewer({ isOpen: false, paper: null })}
+        onSave={handleSavePaperUpdates}
       />
 
       <ComparisonModal
