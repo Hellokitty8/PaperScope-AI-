@@ -1,0 +1,5 @@
+{
+  "name": "PaperScope AI",
+  "description": "A smart research assistant that analyzes PDF papers and extracts key insights into a structured table using Gemini AI.",
+  "requestFramePermissions": []
+}
