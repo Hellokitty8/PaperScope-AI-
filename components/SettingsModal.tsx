@@ -8,6 +8,12 @@ interface SettingsModalProps {
   onSave: (settings: LLMSettings) => void;
 }
 
+const GOOGLE_MODELS = [
+  { id: 'gemini-3-flash-preview', name: 'Gemini 3.0 Flash Preview (Fast & Efficient)' },
+  { id: 'gemini-3-pro-preview', name: 'Gemini 3.0 Pro Preview (Complex Reasoning)' },
+  { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash (Stable)' },
+];
+
 const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
@@ -56,7 +62,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           
           <div className="flex items-center justify-between p-3 bg-indigo-50 rounded-lg border border-indigo-100">
-            <label className="text-sm font-medium text-indigo-900">Enable External Model</label>
+            <label className="text-sm font-medium text-indigo-900">Enable External Model (OpenAI API)</label>
             <div className="relative inline-block w-12 h-6 align-middle select-none">
               <input 
                 type="checkbox" 
@@ -70,42 +76,71 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          <div className={`space-y-4 transition-opacity duration-300 ${!formData.useExternal ? 'opacity-50 pointer-events-none' : ''}`}>
-             <div>
-              <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Base URL</label>
-              <input
-                type="text"
-                name="baseUrl"
-                value={formData.baseUrl}
-                onChange={handleChange}
-                placeholder="https://max.openai365.top/v1"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
-              />
-            </div>
+          <div className="space-y-4 transition-all duration-300">
+             {formData.useExternal ? (
+               <>
+                 <div>
+                  <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Base URL</label>
+                  <input
+                    type="text"
+                    name="baseUrl"
+                    value={formData.baseUrl}
+                    onChange={handleChange}
+                    placeholder="https://api.openai.com/v1"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
+                  />
+                </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">API Key</label>
-              <input
-                type="password"
-                name="apiKey"
-                value={formData.apiKey}
-                onChange={handleChange}
-                placeholder="sk-..."
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
-              />
-            </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">API Key</label>
+                  <input
+                    type="password"
+                    name="apiKey"
+                    value={formData.apiKey}
+                    onChange={handleChange}
+                    placeholder="sk-..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
+                  />
+                </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Model Name</label>
-              <input
-                type="text"
-                name="model"
-                value={formData.model}
-                onChange={handleChange}
-                placeholder="openai/gemini-2.5-pro"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
-              />
-            </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Model Name</label>
+                  <input
+                    type="text"
+                    name="model"
+                    value={formData.model}
+                    onChange={handleChange}
+                    placeholder="gpt-4o"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm"
+                  />
+                </div>
+               </>
+             ) : (
+                /* Internal Google Model Selection */
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 uppercase mb-1">Select Gemini Model</label>
+                  <div className="relative">
+                    <select
+                      name="model"
+                      value={formData.model}
+                      onChange={handleChange}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none text-sm appearance-none bg-white"
+                    >
+                      {GOOGLE_MODELS.map(model => (
+                        <option key={model.id} value={model.id}>
+                          {model.name}
+                        </option>
+                      ))}
+                    </select>
+                    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-700">
+                      <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    API Key is managed via environment variables on the server.
+                  </p>
+                </div>
+             )}
 
             <div className="grid grid-cols-2 gap-4">
                <div>

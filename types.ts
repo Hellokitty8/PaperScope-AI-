@@ -30,7 +30,7 @@ export interface PaperData {
   analysis: AnalysisResult | null;
   errorMessage?: string;
   tags: string[]; // Changed from group to tags array
-  screenshot: string | null;
+  screenshots: string[]; // Changed from single screenshot to array
 }
 
 export interface LLMSettings {
@@ -47,7 +47,7 @@ export const DEFAULT_SETTINGS: LLMSettings = {
   useExternal: false,
   baseUrl: "https://max.openai365.top/v1",
   apiKey: "",
-  model: "openai/gemini-2.5-pro",
+  model: "gemini-3-flash-preview",
   temperature: 0,
   maxContextWindow: 300000,
   timeout: 600

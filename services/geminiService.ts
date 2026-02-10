@@ -174,10 +174,11 @@ export const analyzePaperWithGemini = async (file: File, settings?: LLMSettings)
   }
 
   const ai = new GoogleGenAI({ apiKey });
+  const modelName = settings?.model || "gemini-3-flash-preview";
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview", 
+      model: modelName,
       contents: {
         parts: [
           {
@@ -284,10 +285,11 @@ export const comparePapersWithGemini = async (papers: PaperData[], settings?: LL
     const apiKey = process.env.API_KEY;
     if (!apiKey) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey });
+    const modelName = settings?.model || "gemini-3-flash-preview";
 
     try {
         const response = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
+            model: modelName,
             contents: { parts: [{ text: COMPARE_PROMPT }] },
             config: {
                 responseMimeType: "application/json",
