@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useState } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { v4 as uuidv4 } from 'uuid';
@@ -41,7 +42,17 @@ const PdfViewerModal: React.FC<PdfViewerModalProps> = ({ isOpen, onClose, paper,
   // Load paper data when opened
   useEffect(() => {
     if (isOpen && paper) {
-      const url = URL.createObjectURL(paper.file);
+      let url: string = '';
+      let isBlob = false;
+      
+      // Check if paper.file is string (URL) or Blob/File
+      if (typeof paper.file === 'string') {
+          url = paper.file;
+      } else {
+          url = URL.createObjectURL(paper.file);
+          isBlob = true;
+      }
+      
       setFileUrl(url);
       setHighlights(paper.highlights || []);
       // Reset states
@@ -50,7 +61,7 @@ const PdfViewerModal: React.FC<PdfViewerModalProps> = ({ isOpen, onClose, paper,
       setTempNote('');
       
       return () => {
-        URL.revokeObjectURL(url);
+        if (isBlob) URL.revokeObjectURL(url);
       };
     }
   }, [isOpen, paper]);

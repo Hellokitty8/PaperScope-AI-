@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import * as XLSX from 'xlsx';
@@ -9,7 +10,7 @@ import ComparisonModal from './components/ComparisonModal';
 import ImageModal from './components/ImageModal';
 import AuthPage from './components/AuthPage';
 import { analyzePaperWithGemini, comparePapersWithGemini } from './services/geminiService';
-import { savePaperToDB, getPapersFromDB, deletePaperFromDB, getBannerFromServer, saveBannerToServer } from './services/db';
+import { savePaperToDB, getPapersFromDB, deletePaperFromDB, getBannerFromServer, saveBannerToServer, checkBackendHealth } from './services/db';
 import { PaperData, AnalysisColumn, LLMSettings, DEFAULT_SETTINGS, ComparisonResult, Highlight } from './types';
 
 // Default column widths
@@ -32,7 +33,7 @@ const DEFAULT_WIDTHS: Record<string, number> = {
   screenshot: 200,
 };
 
-// Tag Color Palette
+// Tag Color Palette (Unchanged)
 const TAG_COLORS = [
   { bg: 'bg-blue-50', text: 'text-blue-700', border: 'border-blue-200', activeBg: 'bg-blue-100', hoverBg: 'hover:bg-blue-50' },
   { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200', activeBg: 'bg-emerald-100', hoverBg: 'hover:bg-emerald-50' },
@@ -66,6 +67,10 @@ const App: React.FC = () => {
   const [settings, setSettings] = useState<LLMSettings>(DEFAULT_SETTINGS);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(DEFAULT_WIDTHS);
+  
+  // Backend Health State
+  const [isConnected, setIsConnected] = useState<boolean>(true);
+  const [isChecking, setIsChecking] = useState<boolean>(false);
   
   // Banner State
   const [bannerImage, setBannerImage] = useState<string>('/banner.jpg');
@@ -117,16 +122,30 @@ const App: React.FC = () => {
     type: null,
   });
 
-  // Resizing State
   const resizingRef = useRef<{ key: string; startX: number; startWidth: number } | null>(null);
+
+  // Health Check function
+  const performHealthCheck = async () => {
+      setIsChecking(true);
+      const healthy = await checkBackendHealth();
+      setIsConnected(healthy);
+      setIsChecking(false);
+      return healthy;
+  };
+
+  // Initial Check
+  useEffect(() => {
+      performHealthCheck();
+      const interval = setInterval(performHealthCheck, 30000);
+      return () => clearInterval(interval);
+  }, []);
 
   // Load papers and banner from Server on startup
   useEffect(() => {
     if (currentUser) {
-        // Fetch Shared Banner
+        if (!isConnected) return; // Don't try to fetch if we know it's down
+        
         getBannerFromServer().then(setBannerImage);
-
-        // Fetch Shared Papers (Global Workspace)
         getPapersFromDB(currentUser).then(storedPapers => {
             const sorted = storedPapers.sort((a, b) => b.uploadTime - a.uploadTime);
             setPapers(sorted);
@@ -134,9 +153,35 @@ const App: React.FC = () => {
     } else {
         setPapers([]);
     }
-  }, [currentUser]);
+  }, [currentUser, isConnected]);
 
-  // --- Auth Handlers ---
+  // Helper to sync state to DB
+  const syncPaperToDB = async (paper: PaperData) => {
+      if (!isConnected) {
+          // Try one quick check before failing
+          const healthy = await checkBackendHealth();
+          if (!healthy) {
+              setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, saveStatus: 'error' } : p));
+              return;
+          } else {
+              setIsConnected(true);
+          }
+      }
+
+      setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, saveStatus: 'saving' } : p));
+      
+      try {
+          await savePaperToDB(paper);
+          setPapers(prev => prev.map(p => {
+              if (p.id !== paper.id) return p;
+              return { ...p, saveStatus: 'saved' };
+          }));
+      } catch (e) {
+          console.error("Sync failed for", paper.fileName, e);
+          setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, saveStatus: 'error' } : p));
+      }
+  };
+
   const handleLogin = (username: string) => {
       setCurrentUser(username);
       localStorage.setItem('paperScope_currentUser', username);
@@ -148,7 +193,6 @@ const App: React.FC = () => {
       setPapers([]); 
   };
 
-  // --- Banner Handler ---
   const handleBannerUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
       if (e.target.files && e.target.files[0]) {
           const file = e.target.files[0];
@@ -156,7 +200,7 @@ const App: React.FC = () => {
           reader.onload = (event) => {
               const result = event.target?.result as string;
               setBannerImage(result);
-              saveBannerToServer(result); // Persist to server
+              saveBannerToServer(result); 
           };
           reader.readAsDataURL(file);
       }
@@ -182,6 +226,15 @@ const App: React.FC = () => {
 
   const handleFilesSelected = async (files: File[]) => {
     if (!currentUser) return;
+    
+    // Check connection before processing
+    if (!isConnected) {
+        const healthy = await performHealthCheck();
+        if (!healthy) {
+             alert("无法上传：后端服务未连接。请确认运行了 'npm start'");
+             return;
+        }
+    }
 
     let initialTags: string[] = [];
     if (activeTab !== 'All' && activeTab !== 'Uncategorized') {
@@ -196,28 +249,21 @@ const App: React.FC = () => {
       fileSize: file.size,
       uploadTime: Date.now(),
       status: 'idle',
+      saveStatus: 'saving', 
       analysis: null,
       tags: initialTags,
       screenshots: [],
     }));
 
-    // Optimistically update UI
     setPapers((prev) => [...newPapers, ...prev]); 
     
-    // CRITICAL FIX: Don't await savePaperToDB.
-    // Trigger analysis immediately so UI doesn't hang if DB save is slow/fails.
     newPapers.forEach((paper) => {
-        // Start processing (Analysis)
         processPaper(paper.id, paper.file, settings);
-        
-        // Save to DB in background
-        savePaperToDB(paper).catch(err => {
-            console.warn(`Failed to save paper ${paper.fileName} to DB (background):`, err);
-        });
+        syncPaperToDB(paper);
     });
   };
 
-  const processPaper = async (id: string, file: File, currentSettings: LLMSettings) => {
+  const processPaper = async (id: string, file: File | Blob | string, currentSettings: LLMSettings) => {
     setPapers((prev) =>
       prev.map((p) => (p.id === id ? { ...p, status: 'analyzing' } : p))
     );
@@ -226,7 +272,6 @@ const App: React.FC = () => {
       const result = await analyzePaperWithGemini(file, currentSettings);
       
       let updatedPaper: PaperData | null = null;
-
       setPapers((prev) => {
         return prev.map((p) => {
             if (p.id === id) {
@@ -238,16 +283,13 @@ const App: React.FC = () => {
         });
       });
       
-      // Save updated state to DB (outside of setPapers callback to avoid side-effects)
       if (updatedPaper) {
-          savePaperToDB(updatedPaper).catch(e => console.warn("Failed to save analysis results", e));
+          syncPaperToDB(updatedPaper);
       }
 
     } catch (error: any) {
       console.error(`Analysis failed for paper ${id}:`, error);
-      
       let updatedPaper: PaperData | null = null;
-      
       setPapers((prev) => {
           return prev.map((p) => {
             if (p.id === id) {
@@ -258,9 +300,8 @@ const App: React.FC = () => {
             return p;
           });
       });
-
       if (updatedPaper) {
-          savePaperToDB(updatedPaper).catch(e => console.warn("Failed to save error status", e));
+          syncPaperToDB(updatedPaper);
       }
     }
   };
@@ -308,66 +349,43 @@ const App: React.FC = () => {
 
   const handleCompare = async () => {
     if (selectedPaperIds.size < 2) return;
-
     const selectedPapers = papers.filter(p => selectedPaperIds.has(p.id));
     setComparisonModal({ isOpen: true, isLoading: true, result: null });
-
     try {
         const result = await comparePapersWithGemini(selectedPapers, settings);
         setComparisonModal({ isOpen: true, isLoading: false, result });
     } catch (error) {
-        console.error("Comparison failed", error);
         setComparisonModal({ isOpen: true, isLoading: false, result: null });
     }
   };
 
   const handleExportExcel = () => {
       if (selectedPaperIds.size === 0) return;
-
       const papersToExport = papers.filter(p => selectedPaperIds.has(p.id));
-      
       const data = papersToExport.map(p => ({
           "File Name": p.fileName,
           "Tags": p.tags?.join(', ') || '',
           "Type": p.analysis?.type || '',
           "Title": p.analysis?.title || '',
-          "Venue": p.analysis?.publication || '',
-          "Problem": p.analysis?.problem || '',
-          "Solution": p.analysis?.solution_idea || '',
-          "Contribution": p.analysis?.contribution || '',
-          "Method": p.analysis?.method || '',
-          "Model Architecture": p.analysis?.model_architecture || '',
-          "Key Ideas": p.analysis?.borrowable_ideas || '',
-          "Critique": p.analysis?.critique || '',
-          "Future Work": p.analysis?.future_work || '',
-          "Mind Map": p.analysis?.mind_map || '',
-          "Screenshots": p.screenshots?.length || 0 
       }));
-
       const worksheet = XLSX.utils.json_to_sheet(data);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, "Papers");
       XLSX.writeFile(workbook, `PaperScope_Export_${new Date().toISOString().slice(0,10)}.xlsx`);
   };
 
-  // --- Tag Handling Logic ---
   const startEditingTags = (paper: PaperData) => {
       setTempTagInput((paper.tags || []).join(', '));
       setEditingTagsId(paper.id);
   };
 
   const saveTags = (id: string) => {
-      const newTags = tempTagInput
-        .split(/[,，]/)
-        .map(t => t.trim())
-        .filter(t => t.length > 0);
-      
+      const newTags = tempTagInput.split(/[,，]/).map(t => t.trim()).filter(t => t.length > 0);
       const uniqueTags = Array.from(new Set(newTags));
-
       setPapers(prev => prev.map(p => {
           if (p.id === id) {
               const updated = { ...p, tags: uniqueTags };
-              savePaperToDB(updated);
+              syncPaperToDB(updated);
               return updated;
           }
           return p;
@@ -377,14 +395,13 @@ const App: React.FC = () => {
 
   const handleScreenshotUpload = (id: string, file: File) => {
       if (!file.type.startsWith('image/')) return;
-      
       const reader = new FileReader();
       reader.onload = (e) => {
           const result = e.target?.result as string;
           setPapers(prev => prev.map(p => {
               if (p.id === id) {
                   const updated = { ...p, screenshots: [...(p.screenshots || []), result] };
-                  savePaperToDB(updated);
+                  syncPaperToDB(updated);
                   return updated;
               }
               return p;
@@ -400,22 +417,9 @@ const App: React.FC = () => {
               ...p,
               screenshots: (p.screenshots || []).filter((_, idx) => idx !== indexToRemove)
           };
-          savePaperToDB(updated);
+          syncPaperToDB(updated);
           return updated;
       }));
-  };
-
-  const handlePaste = (id: string, e: React.ClipboardEvent) => {
-      const items = e.clipboardData.items;
-      for (let i = 0; i < items.length; i++) {
-          if (items[i].type.indexOf("image") !== -1) {
-              const blob = items[i].getAsFile();
-              if (blob) {
-                  handleScreenshotUpload(id, blob);
-                  e.preventDefault(); 
-              }
-          }
-      }
   };
 
   const openPdf = (paper: PaperData) => {
@@ -426,7 +430,7 @@ const App: React.FC = () => {
       setPapers(prev => prev.map(p => {
           if (p.id === paperId) {
               const updated = { ...p, highlights };
-              savePaperToDB(updated);
+              syncPaperToDB(updated);
               return updated;
           }
           return p;
@@ -434,14 +438,7 @@ const App: React.FC = () => {
   };
 
   const openDetail = (paperId: string, fieldKey: string, title: string, content: string, type: AnalysisColumn) => {
-    setActiveModal({
-      isOpen: true,
-      paperId,
-      fieldKey,
-      title,
-      content,
-      type,
-    });
+    setActiveModal({ isOpen: true, paperId, fieldKey, title, content, type });
   };
 
   const closeModal = () => {
@@ -453,26 +450,18 @@ const App: React.FC = () => {
         if (p.id === activeModal.paperId && p.analysis) {
             const updated = {
                 ...p,
-                analysis: {
-                    ...p.analysis,
-                    [activeModal.fieldKey]: newContent
-                }
+                analysis: { ...p.analysis, [activeModal.fieldKey]: newContent }
             };
-            savePaperToDB(updated);
+            syncPaperToDB(updated);
             return updated;
         }
         return p;
     }));
   };
 
-  // --- Resizing Logic ---
   const startResize = (e: React.MouseEvent, key: string) => {
     e.preventDefault();
-    resizingRef.current = {
-      key,
-      startX: e.clientX,
-      startWidth: columnWidths[key] || 150,
-    };
+    resizingRef.current = { key, startX: e.clientX, startWidth: columnWidths[key] || 150 };
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
     document.body.style.cursor = 'col-resize';
@@ -495,36 +484,16 @@ const App: React.FC = () => {
     document.body.style.userSelect = '';
   };
 
-  // --- Render Helpers ---
-
-  const RenderCell = ({
-    paper,
-    fieldKey,
-    content,
-    label,
-    type,
-  }: {
-    paper: PaperData;
-    fieldKey: string;
-    content?: string;
-    label: string;
-    type: AnalysisColumn;
-  }) => {
+  const RenderCell = ({ paper, fieldKey, content, label, type }: { paper: PaperData; fieldKey: string; content?: string; label: string; type: AnalysisColumn }) => {
     const isAnalyzing = paper.status === 'analyzing';
     const isError = paper.status === 'error';
 
-    if (isAnalyzing) {
-      return <div className="h-4 bg-gray-100 rounded animate-pulse w-3/4"></div>;
-    }
+    if (isAnalyzing) return <div className="h-4 bg-gray-100 rounded animate-pulse w-3/4"></div>;
 
     if (isError) {
-        // Show error message in the first specific column ('type'), others show simple dash
         if (fieldKey === 'type') {
              return (
                  <div className="text-red-500 text-xs flex items-center gap-1 cursor-help" title={paper.errorMessage}>
-                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 flex-shrink-0">
-                       <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-                     </svg>
                      <span className="truncate">分析失败</span>
                  </div>
              );
@@ -535,13 +504,8 @@ const App: React.FC = () => {
     if (!content) return <span className="text-gray-300 text-xs italic cursor-pointer hover:text-gray-500 transition-colors" onClick={() => openDetail(paper.id, fieldKey, label, '', type)}>暂无内容</span>;
 
     return (
-      <div
-        onClick={() => openDetail(paper.id, fieldKey, label, content, type)}
-        className="group cursor-pointer rounded hover:bg-indigo-50/50 transition-colors duration-200 h-full flex items-start pt-1"
-      >
-        <p className="line-clamp-3 text-sm text-gray-700 leading-relaxed group-hover:text-indigo-900 text-wrap break-words">
-          {content}
-        </p>
+      <div onClick={() => openDetail(paper.id, fieldKey, label, content, type)} className="group cursor-pointer rounded hover:bg-indigo-50/50 transition-colors duration-200 h-full flex items-start pt-1">
+        <p className="line-clamp-3 text-sm text-gray-700 leading-relaxed group-hover:text-indigo-900 text-wrap break-words">{content}</p>
       </div>
     );
   };
@@ -561,46 +525,35 @@ const App: React.FC = () => {
     { label: '🧠 思维导图', key: 'mind_map', colType: AnalysisColumn.MIND_MAP },
   ];
 
-  if (!currentUser) {
-      return <AuthPage onLogin={handleLogin} />;
-  }
+  if (!currentUser) return <AuthPage onLogin={handleLogin} />;
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F8FAFC]">
-      
-      <FileUpload 
-          onFilesSelected={handleFilesSelected} 
-          isProcessing={false} 
-      />
+      <FileUpload onFilesSelected={handleFilesSelected} isProcessing={!isConnected} />
 
-      {/* Professional Header */}
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-gray-200 shadow-sm">
         <div className="max-w-[1920px] mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-3">
-               <div className="w-8 h-8 rounded bg-indigo-600 flex items-center justify-center text-white font-bold shadow-sm">
-                   A
-               </div>
+               <div className="w-8 h-8 rounded bg-indigo-600 flex items-center justify-center text-white font-bold shadow-sm">A</div>
                <div>
-                  <h1 className="text-lg font-bold text-gray-900 tracking-tight leading-none">
-                    XJTLU AI Lab
-                  </h1>
+                  <h1 className="text-lg font-bold text-gray-900 tracking-tight leading-none">XJTLU AI Lab</h1>
                   <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Research Assistant</span>
                </div>
             </div>
-            
-            <div className="h-6 w-px bg-gray-200 mx-2 hidden md:block"></div>
+            {/* Health Indicator */}
+            <div 
+                className={`px-2 py-0.5 rounded text-[10px] font-bold border flex items-center gap-1 transition-colors cursor-pointer ${isConnected ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}
+                onClick={performHealthCheck}
+                title="点击检查连接"
+            >
+                <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`}></div>
+                {isChecking ? '检查中...' : isConnected ? '系统在线' : '后端断开'}
+            </div>
 
-            {/* Desktop Tabs embedded in header */}
+            <div className="h-6 w-px bg-gray-200 mx-2 hidden md:block"></div>
             <nav className="hidden md:flex items-center gap-1">
-               <button
-                    onClick={() => setActiveTab('All')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                        activeTab === 'All' 
-                            ? 'bg-gray-100 text-gray-900' 
-                            : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-                    }`}
-                >
+               <button onClick={() => setActiveTab('All')} className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${activeTab === 'All' ? 'bg-gray-100 text-gray-900' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`}>
                     全部论文
                     <span className="ml-2 bg-gray-200 text-gray-600 py-0.5 px-1.5 rounded-full text-[10px]">{getTagCount('All')}</span>
                 </button>
@@ -608,99 +561,49 @@ const App: React.FC = () => {
                     const style = getTagStyle(tag);
                     const isActive = activeTab === tag;
                     return (
-                        <button
-                            key={tag}
-                            onClick={() => setActiveTab(tag)}
-                            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all border ${
-                                isActive
-                                    ? `${style.activeBg} ${style.text} ${style.border}` 
-                                    : `bg-white ${style.text} border-transparent ${style.hoverBg}`
-                            }`}
-                        >
+                        <button key={tag} onClick={() => setActiveTab(tag)} className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all border ${isActive ? `${style.activeBg} ${style.text} ${style.border}` : `bg-white ${style.text} border-transparent ${style.hoverBg}`}`}>
                             <span>{tag}</span>
-                            <span className={`ml-2 py-0.5 px-1.5 rounded-full text-[10px] ${isActive ? 'bg-white/50 text-inherit' : 'bg-gray-100 text-gray-600'}`}>
-                                {getTagCount(tag)}
-                            </span>
+                            <span className={`ml-2 py-0.5 px-1.5 rounded-full text-[10px] ${isActive ? 'bg-white/50 text-inherit' : 'bg-gray-100 text-gray-600'}`}>{getTagCount(tag)}</span>
                         </button>
                     );
                 })}
             </nav>
           </div>
-
           <div className="flex items-center gap-3">
-             {selectedPaperIds.size >= 1 && (
-                 <button
-                    onClick={handleExportExcel}
-                    className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 rounded-md transition-colors shadow-sm"
-                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-                    </svg>
-                    导出 Excel
-                 </button>
-             )}
-             {selectedPaperIds.size >= 2 && (
-                 <button
-                    onClick={handleCompare}
-                    className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-md transition-colors shadow-sm"
-                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
-                    </svg>
-                    对比论文
-                 </button>
-             )}
-             <button
-              onClick={() => setIsSettingsOpen(true)}
-              className="p-1.5 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
-              title="设置"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M10.34 15.84c-.688-.06-1.386-.09-2.09-.09H7.5a4.5 4.5 0 110-9h.75c.704 0 1.402-.03 2.09-.09m0 9.18c.253.962.584 1.892.985 2.783.247.55.06 1.1-.463 1.112h-1.82a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-              </svg>
-            </button>
-            <div className="h-6 w-px bg-gray-200"></div>
-            
-            <div className="flex items-center gap-3">
-                <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 text-white flex items-center justify-center font-bold text-xs shadow-inner">
-                    {currentUser?.charAt(0).toUpperCase()}
-                </div>
-                <button
-                    onClick={handleLogout}
-                    className="text-xs font-medium text-gray-500 hover:text-red-600 transition-colors"
-                >
-                    退出登录
-                </button>
+             {selectedPaperIds.size >= 1 && <button onClick={handleExportExcel} className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50 rounded-md shadow-sm">导出 Excel</button>}
+             {selectedPaperIds.size >= 2 && <button onClick={handleCompare} className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-md shadow-sm">对比论文</button>}
+             <button onClick={() => setIsSettingsOpen(true)} className="p-1.5 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M10.34 15.84c-.688-.06-1.386-.09-2.09-.09H7.5a4.5 4.5 0 110-9h.75c.704 0 1.402-.03 2.09-.09m0 9.18c.253.962.584 1.892.985 2.783.247.55.06 1.1-.463 1.112h-1.82a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg></button>
+             <div className="h-6 w-px bg-gray-200"></div>
+             <div className="flex items-center gap-3">
+                <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-500 text-white flex items-center justify-center font-bold text-xs shadow-inner">{currentUser?.charAt(0).toUpperCase()}</div>
+                <button onClick={handleLogout} className="text-xs font-medium text-gray-500 hover:text-red-600 transition-colors">退出登录</button>
             </div>
           </div>
         </div>
       </header>
+      
+      {/* Alert if disconnected */}
+      {!isConnected && (
+          <div className="bg-red-600 text-white text-center py-2 text-xs font-bold sticky top-16 z-30 shadow-md animate-in slide-in-from-top-4">
+              <div className="flex items-center justify-center gap-2">
+                 <span>⚠️ 无法连接到后端服务器。数据将不会保存。请在终端运行: npm start</span>
+                 <button 
+                    onClick={performHealthCheck} 
+                    className="bg-white/20 hover:bg-white/30 text-white px-2 py-0.5 rounded text-[10px] uppercase border border-white/20 transition-colors"
+                 >
+                    {isChecking ? '连接中...' : '重试连接'}
+                 </button>
+              </div>
+          </div>
+      )}
 
-      {/* Main Content */}
       <main className="flex-1 px-6 py-6 overflow-hidden flex flex-col gap-6 relative z-0">
-        
-        {/* Banner - Workspace Cover Style */}
         <div className="relative group rounded-xl overflow-hidden shadow-sm border border-gray-200 h-32 md:h-48 shrink-0 bg-gray-100">
-            <img 
-                src={bannerImage} 
-                alt="Workspace Banner" 
-                className="w-full h-full object-cover opacity-90 group-hover:scale-105 transition-transform duration-700 ease-out"
-                onError={(e) => {
-                    (e.target as HTMLImageElement).src = 'https://placehold.co/1200x300/F1F5F9/94A3B8?text=Workspace+Cover';
-                }}
-            />
+            <img src={bannerImage} alt="Workspace Banner" className="w-full h-full object-cover opacity-90 group-hover:scale-105 transition-transform duration-700 ease-out" onError={(e) => { (e.target as HTMLImageElement).src = 'https://placehold.co/1200x300/F1F5F9/94A3B8?text=Workspace+Cover'; }} />
             <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent"></div>
             <label className="absolute bottom-4 right-4 bg-black/40 backdrop-blur-md text-white/90 px-3 py-1.5 rounded-md text-xs font-medium hover:bg-black/60 transition-colors cursor-pointer flex items-center gap-2 border border-white/10 opacity-0 group-hover:opacity-100 transform translate-y-2 group-hover:translate-y-0 duration-200">
-                <input 
-                    type="file" 
-                    accept="image/*" 
-                    className="hidden" 
-                    onChange={handleBannerUpload}
-                />
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
-                </svg>
-                更换封面
+                <input type="file" accept="image/*" className="hidden" onChange={handleBannerUpload} />
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" /></svg>更换封面
             </label>
             <div className="absolute bottom-4 left-6 text-white">
                 <h2 className="text-xl md:text-2xl font-bold tracking-tight">AI 论文阅读助手</h2>
@@ -708,15 +611,10 @@ const App: React.FC = () => {
             </div>
         </div>
 
-        {/* Data Table */}
         <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden flex flex-col relative">
           {papers.length === 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center text-gray-400 p-12 bg-white">
-               <div className="w-16 h-16 rounded-full bg-gray-50 flex items-center justify-center mb-4 border border-gray-100">
-                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="#94A3B8" className="w-8 h-8">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-                   </svg>
-               </div>
+               <div className="w-16 h-16 rounded-full bg-gray-50 flex items-center justify-center mb-4 border border-gray-100"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="#94A3B8" className="w-8 h-8"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg></div>
               <p className="text-lg font-medium text-gray-900">暂无论文</p>
               <p className="text-sm text-gray-500 mt-1">请点击右下角按钮上传 PDF。</p>
             </div>
@@ -725,239 +623,108 @@ const App: React.FC = () => {
               <table className="w-full text-left border-collapse table-fixed">
                 <thead className="bg-gray-50 sticky top-0 z-20 shadow-sm border-b border-gray-200">
                   <tr>
-                    {/* Checkbox Column Header */}
-                    <th 
-                        className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 w-12 text-center"
-                        style={{ width: columnWidths['checkbox'] }}
-                    >
-                        <input 
-                            type="checkbox"
-                            checked={filteredPapers.length > 0 && filteredPapers.every(p => selectedPaperIds.has(p.id))}
-                            onChange={toggleAllSelection}
-                            className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer"
-                        />
+                    <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 w-12 text-center" style={{ width: columnWidths['checkbox'] }}>
+                        <input type="checkbox" checked={filteredPapers.length > 0 && filteredPapers.every(p => selectedPaperIds.has(p.id))} onChange={toggleAllSelection} className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer" />
                     </th>
-
-                    {/* File Column Header */}
-                    <th 
-                        className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors"
-                        style={{ width: columnWidths['file'] || 300 }}
-                    >
+                    <th className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths['file'] || 300 }}>
                       📄 论文文件
-                      <div 
-                        className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10"
-                        onMouseDown={(e) => startResize(e, 'file')}
-                      />
+                      <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, 'file')} />
                     </th>
-
-                    {/* Tags Column Header */}
-                    <th 
-                        className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors"
-                        style={{ width: columnWidths['tags'] || 160 }}
-                    >
+                    <th className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths['tags'] || 160 }}>
                       🏷️ 标签
-                      <div 
-                        className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10"
-                        onMouseDown={(e) => startResize(e, 'tags')}
-                      />
+                      <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, 'tags')} />
                     </th>
-
-                    {/* Dynamic Headers */}
                     {columns.map((col) => (
-                      <th
-                        key={col.label}
-                        className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors"
-                        style={{ width: columnWidths[col.key] || 220 }}
-                      >
+                      <th key={col.label} className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths[col.key] || 220 }}>
                         {col.label}
-                        <div 
-                            className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10"
-                            onMouseDown={(e) => startResize(e, col.key)}
-                        />
+                        <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, col.key)} />
                       </th>
                     ))}
-                    
-                    {/* Screenshot Header */}
-                    <th 
-                        className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors"
-                        style={{ width: columnWidths['screenshot'] || 200 }}
-                    >
+                    <th className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths['screenshot'] || 200 }}>
                       🖼️ 截图
-                      <div 
-                        className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10"
-                        onMouseDown={(e) => startResize(e, 'screenshot')}
-                      />
+                      <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, 'screenshot')} />
                     </th>
-
-                    {/* Action Header */}
-                    <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider w-16 text-center">
-                      ...
-                    </th>
+                    <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider w-16 text-center">...</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {filteredPapers.map((paper) => {
                     const isAnalyzing = paper.status === 'analyzing';
                     const isError = paper.status === 'error';
+                    const isSaving = paper.saveStatus === 'saving';
+                    const saveFailed = paper.saveStatus === 'error';
                     const isSelected = selectedPaperIds.has(paper.id);
                     const isEditingTags = editingTagsId === paper.id;
                     
                     return (
-                      <tr
-                        key={paper.id}
-                        className={`hover:bg-gray-50/80 transition-colors group ${isSelected ? 'bg-indigo-50/30' : ''}`}
-                      >
-                         {/* Checkbox Column */}
+                      <tr key={paper.id} className={`hover:bg-gray-50/80 transition-colors group ${isSelected ? 'bg-indigo-50/30' : ''}`}>
                          <td className="p-3 align-top text-center border-r border-gray-100" style={{ width: columnWidths['checkbox'] }}>
-                             <input 
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() => toggleSelection(paper.id)}
-                                className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer mt-1"
-                             />
+                             <input type="checkbox" checked={isSelected} onChange={() => toggleSelection(paper.id)} className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer mt-1" />
                          </td>
-
-                        {/* File Column */}
                         <td className="p-3 align-top overflow-hidden border-r border-gray-100" style={{ width: columnWidths['file'] || 300 }}>
                           <div className="flex items-start gap-3">
                             <div className="mt-0.5 text-gray-400 shrink-0">
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-                                </svg>
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
                             </div>
                             <div className="overflow-hidden w-full">
-                              <p 
-                                className="font-medium text-gray-900 hover:text-indigo-600 text-sm truncate w-full cursor-pointer transition-colors" 
-                                title="Click to view PDF"
-                                onClick={() => openPdf(paper)}
-                              >
+                              <p className="font-medium text-gray-900 hover:text-indigo-600 text-sm truncate w-full cursor-pointer transition-colors" onClick={() => openPdf(paper)}>
                                 {paper.fileName}
                               </p>
                               <div className="flex items-center gap-2 mt-1">
+                                {isSaving && <span className="text-[10px] text-indigo-500 animate-pulse">☁️ 保存中...</span>}
+                                {saveFailed && <span className="text-[10px] text-red-500 font-bold" title="上传失败，刷新后数据将丢失">⚠️ 保存失败</span>}
                                 {isAnalyzing && (
                                   <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-100/50">
                                     <span className="w-1 h-1 rounded-full bg-amber-500 animate-pulse"></span>
                                     正在分析...
                                   </span>
                                 )}
-                                {isError && (
-                                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-700 border border-red-100/50">
-                                    失败
-                                  </span>
-                                )}
+                                {isError && <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-700 border border-red-100/50">失败</span>}
                                 {!isAnalyzing && !isError && (
-                                    <span className="text-[10px] text-gray-400 font-mono">
-                                        {(paper.fileSize / 1024 / 1024).toFixed(2)} MB
-                                    </span>
+                                    <span className="text-[10px] text-gray-400 font-mono">{(paper.fileSize / 1024 / 1024).toFixed(2)} MB</span>
                                 )}
                               </div>
                             </div>
                           </div>
                         </td>
 
-                        {/* Tags Column */}
                         <td className="p-3 align-top border-r border-gray-100" style={{ width: columnWidths['tags'] || 160 }}>
                             {isEditingTags ? (
-                                <input 
-                                    type="text"
-                                    value={tempTagInput}
-                                    onChange={(e) => setTempTagInput(e.target.value)}
-                                    onBlur={() => saveTags(paper.id)}
-                                    onKeyDown={(e) => {
-                                        if (e.key === 'Enter') saveTags(paper.id);
-                                        if (e.key === 'Escape') setEditingTagsId(null);
-                                    }}
-                                    autoFocus
-                                    className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs text-gray-900 shadow-sm focus:ring-1 focus:ring-indigo-500 outline-none"
-                                    placeholder="标签1, 标签2..."
-                                />
+                                <input type="text" value={tempTagInput} onChange={(e) => setTempTagInput(e.target.value)} onBlur={() => saveTags(paper.id)} onKeyDown={(e) => { if (e.key === 'Enter') saveTags(paper.id); if (e.key === 'Escape') setEditingTagsId(null); }} autoFocus className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs text-gray-900 shadow-sm focus:ring-1 focus:ring-indigo-500 outline-none" placeholder="标签1, 标签2..." />
                             ) : (
-                                <div 
-                                    onClick={() => startEditingTags(paper)}
-                                    className="flex flex-wrap gap-1.5 cursor-text min-h-[24px] content-start"
-                                >
+                                <div onClick={() => startEditingTags(paper)} className="flex flex-wrap gap-1.5 cursor-text min-h-[24px] content-start">
                                     {paper.tags && paper.tags.length > 0 ? (
                                         paper.tags.map((tag, idx) => {
                                             const style = getTagStyle(tag);
-                                            return (
-                                              <span 
-                                                  key={idx}
-                                                  className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold border ${style.bg} ${style.text} ${style.border}`}
-                                              >
-                                                  {tag}
-                                              </span>
-                                            );
+                                            return <span key={idx} className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold border ${style.bg} ${style.text} ${style.border}`}>{tag}</span>;
                                         })
                                     ) : (
-                                        <span className="text-gray-300 text-[10px] hover:text-gray-500 border border-transparent hover:border-gray-200 px-1 rounded transition-colors opacity-0 group-hover:opacity-100">
-                                            + 添加标签
-                                        </span>
+                                        <span className="text-gray-300 text-[10px] hover:text-gray-500 border border-transparent hover:border-gray-200 px-1 rounded transition-colors opacity-0 group-hover:opacity-100">+ 添加标签</span>
                                     )}
                                 </div>
                             )}
                         </td>
-
-                        {/* Analysis Columns */}
                         {columns.map((col) => (
-                          <td 
-                            key={`${paper.id}-${col.key}`} 
-                            className="p-3 align-top border-r border-gray-100 overflow-hidden"
-                            style={{ width: columnWidths[col.key] || 220 }}
-                          >
-                             <RenderCell
-                                paper={paper}
-                                fieldKey={col.key}
-                                label={col.label}
-                                type={col.colType}
-                                content={paper.analysis ? (paper.analysis as any)[col.key] : ''}
-                             />
+                          <td key={`${paper.id}-${col.key}`} className="p-3 align-top border-r border-gray-100 overflow-hidden" style={{ width: columnWidths[col.key] || 220 }}>
+                             <RenderCell paper={paper} fieldKey={col.key} label={col.label} type={col.colType} content={paper.analysis ? (paper.analysis as any)[col.key] : ''} />
                           </td>
                         ))}
-
-                        {/* Screenshot Column */}
-                        <td 
-                           className="p-3 align-top border-r border-gray-100"
-                           style={{ width: columnWidths['screenshot'] || 200 }}
-                        >
+                        <td className="p-3 align-top border-r border-gray-100" style={{ width: columnWidths['screenshot'] || 200 }}>
                             <div className="w-full h-full min-h-[60px] outline-none flex flex-wrap content-start gap-2">
                                 {paper.screenshots && paper.screenshots.length > 0 && paper.screenshots.map((shot, idx) => (
                                     <div key={idx} className="relative group/shot w-[60px] h-[60px] border border-gray-200 rounded overflow-hidden bg-gray-50 flex-shrink-0">
-                                        <img 
-                                            src={shot} 
-                                            alt={`Screenshot ${idx + 1}`} 
-                                            className="w-full h-full object-cover cursor-zoom-in hover:scale-105 transition-transform duration-200"
-                                            onClick={() => setImageModal({ isOpen: true, url: shot })}
-                                        />
-                                        <button 
-                                            onClick={(e) => { e.stopPropagation(); removeScreenshot(paper.id, idx); }}
-                                            className="absolute top-0.5 right-0.5 p-0.5 bg-black/50 text-white rounded opacity-0 group-hover/shot:opacity-100 transition-opacity hover:bg-red-500"
-                                        >
-                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
-                                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                            </svg>
-                                        </button>
+                                        <img src={shot} alt={`Screenshot ${idx + 1}`} className="w-full h-full object-cover cursor-zoom-in hover:scale-105 transition-transform duration-200" onClick={() => setImageModal({ isOpen: true, url: shot })} />
+                                        <button onClick={(e) => { e.stopPropagation(); removeScreenshot(paper.id, idx); }} className="absolute top-0.5 right-0.5 p-0.5 bg-black/50 text-white rounded opacity-0 group-hover/shot:opacity-100 transition-opacity hover:bg-red-500"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></button>
                                     </div>
                                 ))}
-                                
-                                {/* Always visible Add Button */}
                                 <label className="flex flex-col items-center justify-center w-[60px] h-[60px] cursor-pointer rounded border border-dashed border-gray-300 bg-gray-50 hover:bg-white hover:border-indigo-400 transition-all group/upload flex-shrink-0">
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 text-gray-400 group-hover/upload:text-indigo-500">
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                                    </svg>
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 text-gray-400 group-hover/upload:text-indigo-500"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
                                     <input type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && handleScreenshotUpload(paper.id, e.target.files[0])} />
                                 </label>
                             </div>
                         </td>
-
                         <td className="p-3 align-top text-center w-16">
-                          <button
-                            onClick={() => deletePaper(paper.id)}
-                            className="text-gray-300 hover:text-red-600 transition-colors p-1 rounded"
-                          >
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-                            </svg>
-                          </button>
+                          <button onClick={() => deletePaper(paper.id)} className="text-gray-300 hover:text-red-600 transition-colors p-1 rounded"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg></button>
                         </td>
                       </tr>
                     );
@@ -969,41 +736,11 @@ const App: React.FC = () => {
         </div>
       </main>
 
-      <DetailModal
-        isOpen={activeModal.isOpen}
-        onClose={closeModal}
-        title={activeModal.title}
-        content={activeModal.content}
-        type={activeModal.type}
-        onSave={handleUpdateAnalysis}
-      />
-      
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        settings={settings}
-        onSave={setSettings}
-      />
-      
-      <PdfViewerModal 
-        isOpen={pdfViewer.isOpen}
-        paper={pdfViewer.paper}
-        onClose={() => setPdfViewer({ isOpen: false, paper: null })}
-        onSave={handleSavePaperUpdates}
-      />
-
-      <ComparisonModal
-        isOpen={comparisonModal.isOpen}
-        isLoading={comparisonModal.isLoading}
-        result={comparisonModal.result}
-        onClose={() => setComparisonModal(prev => ({ ...prev, isOpen: false }))}
-      />
-
-      <ImageModal 
-        isOpen={imageModal.isOpen}
-        onClose={() => setImageModal({ isOpen: false, url: null })}
-        imageUrl={imageModal.url}
-      />
+      <DetailModal isOpen={activeModal.isOpen} onClose={closeModal} title={activeModal.title} content={activeModal.content} type={activeModal.type} onSave={handleUpdateAnalysis} />
+      <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} settings={settings} onSave={setSettings} />
+      <PdfViewerModal isOpen={pdfViewer.isOpen} paper={pdfViewer.paper} onClose={() => setPdfViewer({ isOpen: false, paper: null })} onSave={handleSavePaperUpdates} />
+      <ComparisonModal isOpen={comparisonModal.isOpen} isLoading={comparisonModal.isLoading} result={comparisonModal.result} onClose={() => setComparisonModal(prev => ({ ...prev, isOpen: false }))} />
+      <ImageModal isOpen={imageModal.isOpen} onClose={() => setImageModal({ isOpen: false, url: null })} imageUrl={imageModal.url} />
     </div>
   );
 };

@@ -1,7 +1,23 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { AnalysisResult, LLMSettings, ComparisonResult, PaperData } from "../types";
 
-const processFileToBase64 = (file: File | Blob): Promise<string> => {
+// Helper: Convert File/Blob OR URL string to Base64 (pure data, no prefix)
+const processFileToBase64 = async (file: File | Blob | string): Promise<string> => {
+  let blob: Blob;
+
+  if (typeof file === 'string') {
+      // It's a URL (e.g. /api/files/...). Fetch it first.
+      try {
+          const res = await fetch(file);
+          if (!res.ok) throw new Error("Failed to fetch PDF from server for analysis");
+          blob = await res.blob();
+      } catch (e) {
+          throw new Error("Could not download file for analysis: " + e);
+      }
+  } else {
+      blob = file;
+  }
+
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -14,7 +30,7 @@ const processFileToBase64 = (file: File | Blob): Promise<string> => {
       }
     };
     reader.onerror = (error) => reject(error);
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
 };
 
@@ -200,8 +216,9 @@ const normalizeKeys = (obj: any): AnalysisResult => {
     return newObj as AnalysisResult;
 };
 
-export const analyzePaperWithGemini = async (file: File | Blob, settings?: LLMSettings): Promise<AnalysisResult> => {
+export const analyzePaperWithGemini = async (file: File | Blob | string, settings?: LLMSettings): Promise<AnalysisResult> => {
   const base64Data = await processFileToBase64(file);
+  const mimeType = 'application/pdf'; // We assume PDF for now based on app constraint
 
   // 1. External Model Path (OpenAI Compatible)
   if (settings?.useExternal) {
@@ -220,7 +237,7 @@ export const analyzePaperWithGemini = async (file: File | Blob, settings?: LLMSe
             {
               type: "image_url",
               image_url: {
-                url: `data:${file.type};base64,${base64Data}`, 
+                url: `data:${mimeType};base64,${base64Data}`, 
               }
             }
           ]
@@ -285,7 +302,7 @@ export const analyzePaperWithGemini = async (file: File | Blob, settings?: LLMSe
         parts: [
           {
             inlineData: {
-              mimeType: file.type,
+              mimeType: mimeType,
               data: base64Data,
             },
           },

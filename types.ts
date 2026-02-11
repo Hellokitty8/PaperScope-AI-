@@ -42,17 +42,19 @@ export interface Highlight {
 
 export interface PaperData {
   id: string;
-  userId?: string; // Added for DB isolation
-  file: File;
+  userId?: string; 
+  file: File | Blob | string;
   fileName: string;
   fileSize: number;
   uploadTime: number;
   status: 'idle' | 'analyzing' | 'success' | 'error';
+  // New field to track database persistence status
+  saveStatus?: 'saving' | 'saved' | 'error';
   analysis: AnalysisResult | null;
   errorMessage?: string;
   tags: string[]; 
   screenshots: string[]; 
-  highlights?: Highlight[]; // Added for PDF highlighting
+  highlights?: Highlight[]; 
 }
 
 export interface LLMSettings {

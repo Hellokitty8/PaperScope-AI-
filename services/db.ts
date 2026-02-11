@@ -5,21 +5,36 @@ import { PaperData } from '../types';
  * Bridge service for Server-side persistence
  */
 
+export const checkBackendHealth = async (): Promise<boolean> => {
+    try {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), 2000); // 2s timeout
+        const res = await fetch('/api/health', { signal: controller.signal });
+        clearTimeout(id);
+        return res.ok;
+    } catch (e) {
+        console.error("Backend health check failed:", e);
+        return false;
+    }
+};
+
 export const savePaperToDB = async (paper: PaperData) => {
   try {
-    // We need to ensure the file is in a serializable state (base64)
-    // if it's a File object from upload
-    let serializablePaper = { ...paper };
+    const serializablePaper: any = { ...paper };
     
-    // Convert File to Base64 if it's currently a File object
-    // This handles the first upload case
-    if (paper.file instanceof File) {
-        serializablePaper.file = await fileToBase64(paper.file) as any;
+    // Logic to handle file payload
+    if (paper.file instanceof Blob) {
+        // New file upload: Convert to base64
+        serializablePaper.file = await blobToBase64(paper.file);
+    } else if (typeof paper.file === 'string') {
+        // Existing URL: Don't re-upload content to save bandwidth
+        // Server knows not to delete the file if this is missing/string
+        delete serializablePaper.file; 
     }
 
-    // Add AbortController for timeout (e.g., 5 seconds)
+    // Increased timeout for large files (120 seconds)
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 5000);
+    const id = setTimeout(() => controller.abort(), 120000); 
 
     const response = await fetch('/api/papers', {
       method: 'POST',
@@ -30,30 +45,28 @@ export const savePaperToDB = async (paper: PaperData) => {
     clearTimeout(id);
     
     if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`);
+        const text = await response.text();
+        throw new Error(`Server error ${response.status}: ${text}`);
     }
+    
+    return true;
   } catch (error) {
-    // Log but don't crash. UI works in-memory even if DB fails.
-    console.warn("Failed to save paper to Server (Offline mode?):", error);
+    console.error("FATAL: Failed to save paper to Server:", error);
+    throw error; // Propagate error so UI can show it
   }
 };
 
 export const getPapersFromDB = async (_userId: string): Promise<PaperData[]> => {
   try {
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 5000);
+    const id = setTimeout(() => controller.abort(), 10000); 
     
     const response = await fetch('/api/papers', { signal: controller.signal });
     clearTimeout(id);
     
     if (!response.ok) return [];
     const papers = await response.json();
-    
-    // Reconstruct File-like blobs from base64 if needed for PDF viewer
-    return papers.map((p: any) => ({
-        ...p,
-        file: base64ToBlob(p.file, 'application/pdf')
-    }));
+    return papers;
   } catch (error) {
     console.warn("Failed to fetch papers from Server:", error);
     return [];
@@ -68,7 +81,6 @@ export const deletePaperFromDB = async (id: string) => {
   }
 };
 
-// Config Persistence
 export const getBannerFromServer = async (): Promise<string> => {
     try {
         const res = await fetch('/api/config/banner');
@@ -92,29 +104,9 @@ export const saveBannerToServer = async (banner: string) => {
     }
 };
 
-// Helpers
-const fileToBase64 = (file: File) => new Promise((resolve, reject) => {
+const blobToBase64 = (blob: Blob) => new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
     reader.onload = () => resolve(reader.result);
     reader.onerror = error => reject(error);
 });
-
-const base64ToBlob = (base64: string, type: string) => {
-    if (!base64 || typeof base64 !== 'string') return base64;
-    
-    try {
-        const parts = base64.split(';base64,');
-        const contentType = parts.length > 1 ? parts[0].split(':')[1] : type;
-        const raw = window.atob(parts.length > 1 ? parts[1] : base64);
-        const rawLength = raw.length;
-        const uInt8Array = new Uint8Array(rawLength);
-        for (let i = 0; i < rawLength; ++i) {
-            uInt8Array[i] = raw.charCodeAt(i);
-        }
-        return new Blob([uInt8Array], { type: contentType || type });
-    } catch (e) {
-        console.error("Failed to convert base64 to blob", e);
-        return new Blob([], { type });
-    }
-};
