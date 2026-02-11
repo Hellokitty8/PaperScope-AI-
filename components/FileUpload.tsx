@@ -28,7 +28,7 @@ const FileUpload: React.FC<FileUploadProps> = ({ onFilesSelected, isProcessing }
       {/* Tooltip bubble */}
       <div className={`transition-all duration-300 transform origin-bottom-right ${isHovered ? 'scale-100 opacity-100' : 'scale-90 opacity-0'} mb-1`}>
         <div className="bg-gray-900 text-white px-3 py-1.5 rounded-lg shadow-xl font-medium text-xs whitespace-nowrap">
-          Upload Paper (PDF)
+          上传论文 (PDF)
         </div>
       </div>
 

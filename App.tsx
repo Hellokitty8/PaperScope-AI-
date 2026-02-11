@@ -9,7 +9,7 @@ import ComparisonModal from './components/ComparisonModal';
 import ImageModal from './components/ImageModal';
 import AuthPage from './components/AuthPage';
 import { analyzePaperWithGemini, comparePapersWithGemini } from './services/geminiService';
-import { savePaperToDB, getPapersFromDB, deletePaperFromDB } from './services/db';
+import { savePaperToDB, getPapersFromDB, deletePaperFromDB, getBannerFromServer, saveBannerToServer } from './services/db';
 import { PaperData, AnalysisColumn, LLMSettings, DEFAULT_SETTINGS, ComparisonResult, Highlight } from './types';
 
 // Default column widths
@@ -26,7 +26,10 @@ const DEFAULT_WIDTHS: Record<string, number> = {
   method: 220,
   model_architecture: 220,
   borrowable_ideas: 220,
-  screenshot: 180,
+  critique: 250,
+  future_work: 250,
+  mind_map: 250,
+  screenshot: 200,
 };
 
 // Tag Color Palette
@@ -65,9 +68,7 @@ const App: React.FC = () => {
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(DEFAULT_WIDTHS);
   
   // Banner State
-  const [bannerImage, setBannerImage] = useState<string>(() => {
-    return localStorage.getItem('paperScope_banner') || '/banner.jpg';
-  });
+  const [bannerImage, setBannerImage] = useState<string>('/banner.jpg');
   
   // Grouping/Tagging State
   const [activeTab, setActiveTab] = useState<string>('All');
@@ -119,11 +120,14 @@ const App: React.FC = () => {
   // Resizing State
   const resizingRef = useRef<{ key: string; startX: number; startWidth: number } | null>(null);
 
-  // Load papers from DB on startup
+  // Load papers and banner from Server on startup
   useEffect(() => {
     if (currentUser) {
+        // Fetch Shared Banner
+        getBannerFromServer().then(setBannerImage);
+
+        // Fetch Shared Papers (Global Workspace)
         getPapersFromDB(currentUser).then(storedPapers => {
-            // Sort by upload time descending
             const sorted = storedPapers.sort((a, b) => b.uploadTime - a.uploadTime);
             setPapers(sorted);
         });
@@ -141,7 +145,7 @@ const App: React.FC = () => {
   const handleLogout = () => {
       setCurrentUser(null);
       localStorage.removeItem('paperScope_currentUser');
-      setPapers([]); // Clear local state
+      setPapers([]); 
   };
 
   // --- Banner Handler ---
@@ -152,7 +156,7 @@ const App: React.FC = () => {
           reader.onload = (event) => {
               const result = event.target?.result as string;
               setBannerImage(result);
-              localStorage.setItem('paperScope_banner', result);
+              saveBannerToServer(result); // Persist to server
           };
           reader.readAsDataURL(file);
       }
@@ -198,13 +202,19 @@ const App: React.FC = () => {
     }));
 
     // Optimistically update UI
-    setPapers((prev) => [...newPapers, ...prev]); // Add to top
+    setPapers((prev) => [...newPapers, ...prev]); 
     
-    // Save to DB
-    newPapers.forEach(p => savePaperToDB(p));
-
-    // Start processing
-    newPapers.forEach((paper) => processPaper(paper.id, paper.file, settings));
+    // CRITICAL FIX: Don't await savePaperToDB.
+    // Trigger analysis immediately so UI doesn't hang if DB save is slow/fails.
+    newPapers.forEach((paper) => {
+        // Start processing (Analysis)
+        processPaper(paper.id, paper.file, settings);
+        
+        // Save to DB in background
+        savePaperToDB(paper).catch(err => {
+            console.warn(`Failed to save paper ${paper.fileName} to DB (background):`, err);
+        });
+    });
   };
 
   const processPaper = async (id: string, file: File, currentSettings: LLMSettings) => {
@@ -215,28 +225,43 @@ const App: React.FC = () => {
     try {
       const result = await analyzePaperWithGemini(file, currentSettings);
       
+      let updatedPaper: PaperData | null = null;
+
       setPapers((prev) => {
         return prev.map((p) => {
             if (p.id === id) {
                 const updated = { ...p, status: 'success' as const, analysis: result };
-                savePaperToDB(updated); // Save success state to DB
+                updatedPaper = updated;
                 return updated;
             }
             return p;
         });
       });
+      
+      // Save updated state to DB (outside of setPapers callback to avoid side-effects)
+      if (updatedPaper) {
+          savePaperToDB(updatedPaper).catch(e => console.warn("Failed to save analysis results", e));
+      }
 
     } catch (error: any) {
+      console.error(`Analysis failed for paper ${id}:`, error);
+      
+      let updatedPaper: PaperData | null = null;
+      
       setPapers((prev) => {
           return prev.map((p) => {
             if (p.id === id) {
                 const updated = { ...p, status: 'error' as const, errorMessage: error.message || 'Analysis failed' };
-                savePaperToDB(updated); // Save error state to DB
+                updatedPaper = updated;
                 return updated;
             }
             return p;
           });
       });
+
+      if (updatedPaper) {
+          savePaperToDB(updatedPaper).catch(e => console.warn("Failed to save error status", e));
+      }
     }
   };
 
@@ -313,6 +338,9 @@ const App: React.FC = () => {
           "Method": p.analysis?.method || '',
           "Model Architecture": p.analysis?.model_architecture || '',
           "Key Ideas": p.analysis?.borrowable_ideas || '',
+          "Critique": p.analysis?.critique || '',
+          "Future Work": p.analysis?.future_work || '',
+          "Mind Map": p.analysis?.mind_map || '',
           "Screenshots": p.screenshots?.length || 0 
       }));
 
@@ -470,31 +498,48 @@ const App: React.FC = () => {
   // --- Render Helpers ---
 
   const RenderCell = ({
-    paperId,
+    paper,
     fieldKey,
     content,
     label,
     type,
-    isLoading
   }: {
-    paperId: string;
+    paper: PaperData;
     fieldKey: string;
     content?: string;
     label: string;
     type: AnalysisColumn;
-    isLoading: boolean;
   }) => {
-    if (isLoading) {
+    const isAnalyzing = paper.status === 'analyzing';
+    const isError = paper.status === 'error';
+
+    if (isAnalyzing) {
       return <div className="h-4 bg-gray-100 rounded animate-pulse w-3/4"></div>;
     }
-    if (!content) return <span className="text-gray-300 text-xs italic cursor-pointer hover:text-gray-500 transition-colors" onClick={() => openDetail(paperId, fieldKey, label, '', type)}>No Data</span>;
+
+    if (isError) {
+        // Show error message in the first specific column ('type'), others show simple dash
+        if (fieldKey === 'type') {
+             return (
+                 <div className="text-red-500 text-xs flex items-center gap-1 cursor-help" title={paper.errorMessage}>
+                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 flex-shrink-0">
+                       <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                     </svg>
+                     <span className="truncate">分析失败</span>
+                 </div>
+             );
+        }
+        return <span className="text-red-200 text-xs">-</span>;
+    }
+
+    if (!content) return <span className="text-gray-300 text-xs italic cursor-pointer hover:text-gray-500 transition-colors" onClick={() => openDetail(paper.id, fieldKey, label, '', type)}>暂无内容</span>;
 
     return (
       <div
-        onClick={() => openDetail(paperId, fieldKey, label, content, type)}
+        onClick={() => openDetail(paper.id, fieldKey, label, content, type)}
         className="group cursor-pointer rounded hover:bg-indigo-50/50 transition-colors duration-200 h-full flex items-start pt-1"
       >
-        <p className="line-clamp-3 text-sm text-gray-700 leading-relaxed group-hover:text-indigo-900">
+        <p className="line-clamp-3 text-sm text-gray-700 leading-relaxed group-hover:text-indigo-900 text-wrap break-words">
           {content}
         </p>
       </div>
@@ -502,15 +547,18 @@ const App: React.FC = () => {
   };
 
   const columns = [
-    { label: 'Type', key: 'type', colType: AnalysisColumn.TYPE },
-    { label: 'Title', key: 'title', colType: AnalysisColumn.TITLE },
-    { label: 'Venue', key: 'publication', colType: AnalysisColumn.PUBLICATION },
-    { label: 'Problem', key: 'problem', colType: AnalysisColumn.PROBLEM },
-    { label: 'Solution', key: 'solution_idea', colType: AnalysisColumn.SOLUTION },
-    { label: 'Contribution', key: 'contribution', colType: AnalysisColumn.CONTRIBUTION },
-    { label: 'Method', key: 'method', colType: AnalysisColumn.METHOD },
-    { label: 'Model Arch', key: 'model_architecture', colType: AnalysisColumn.MODEL },
-    { label: 'Key Ideas', key: 'borrowable_ideas', colType: AnalysisColumn.IDEAS },
+    { label: '📌 类型', key: 'type', colType: AnalysisColumn.TYPE },
+    { label: '📑 论文标题', key: 'title', colType: AnalysisColumn.TITLE },
+    { label: '🏛️ 发表刊物', key: 'publication', colType: AnalysisColumn.PUBLICATION },
+    { label: '❓ 想要解决的问题', key: 'problem', colType: AnalysisColumn.PROBLEM },
+    { label: '💡 解决思路', key: 'solution_idea', colType: AnalysisColumn.SOLUTION },
+    { label: '🎁 贡献', key: 'contribution', colType: AnalysisColumn.CONTRIBUTION },
+    { label: '🛠️ 方法', key: 'method', colType: AnalysisColumn.METHOD },
+    { label: '🏗️ 模型图', key: 'model_architecture', colType: AnalysisColumn.MODEL },
+    { label: '✨ 可借鉴思路', key: 'borrowable_ideas', colType: AnalysisColumn.IDEAS },
+    { label: '⚖️ 批判性评估', key: 'critique', colType: AnalysisColumn.CRITIQUE },
+    { label: '🚀 未来研究方向', key: 'future_work', colType: AnalysisColumn.FUTURE_WORK },
+    { label: '🧠 思维导图', key: 'mind_map', colType: AnalysisColumn.MIND_MAP },
   ];
 
   if (!currentUser) {
@@ -537,7 +585,7 @@ const App: React.FC = () => {
                   <h1 className="text-lg font-bold text-gray-900 tracking-tight leading-none">
                     XJTLU AI Lab
                   </h1>
-                  <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Research Workspace</span>
+                  <span className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Research Assistant</span>
                </div>
             </div>
             
@@ -553,7 +601,7 @@ const App: React.FC = () => {
                             : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
                     }`}
                 >
-                    All Papers
+                    全部论文
                     <span className="ml-2 bg-gray-200 text-gray-600 py-0.5 px-1.5 rounded-full text-[10px]">{getTagCount('All')}</span>
                 </button>
                 {uniqueTags.map(tag => {
@@ -588,7 +636,7 @@ const App: React.FC = () => {
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
                     </svg>
-                    Export
+                    导出 Excel
                  </button>
              )}
              {selectedPaperIds.size >= 2 && (
@@ -599,13 +647,13 @@ const App: React.FC = () => {
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
                     </svg>
-                    Compare
+                    对比论文
                  </button>
              )}
              <button
               onClick={() => setIsSettingsOpen(true)}
               className="p-1.5 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
-              title="Settings"
+              title="设置"
             >
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M10.34 15.84c-.688-.06-1.386-.09-2.09-.09H7.5a4.5 4.5 0 110-9h.75c.704 0 1.402-.03 2.09-.09m0 9.18c.253.962.584 1.892.985 2.783.247.55.06 1.1-.463 1.112h-1.82a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
@@ -621,7 +669,7 @@ const App: React.FC = () => {
                     onClick={handleLogout}
                     className="text-xs font-medium text-gray-500 hover:text-red-600 transition-colors"
                 >
-                    Sign out
+                    退出登录
                 </button>
             </div>
           </div>
@@ -652,11 +700,11 @@ const App: React.FC = () => {
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
                 </svg>
-                Change Cover
+                更换封面
             </label>
             <div className="absolute bottom-4 left-6 text-white">
-                <h2 className="text-xl md:text-2xl font-bold tracking-tight">Paper Analysis</h2>
-                <p className="text-white/80 text-sm">Organize and analyze your research literature.</p>
+                <h2 className="text-xl md:text-2xl font-bold tracking-tight">AI 论文阅读助手</h2>
+                <p className="text-white/80 text-sm">Collaborative workspace for AI analysis.</p>
             </div>
         </div>
 
@@ -669,8 +717,8 @@ const App: React.FC = () => {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
                    </svg>
                </div>
-              <p className="text-lg font-medium text-gray-900">No papers yet</p>
-              <p className="text-sm text-gray-500 mt-1">Upload a PDF to get started with the analysis.</p>
+              <p className="text-lg font-medium text-gray-900">暂无论文</p>
+              <p className="text-sm text-gray-500 mt-1">请点击右下角按钮上传 PDF。</p>
             </div>
           ) : (
             <div className="overflow-auto custom-scrollbar flex-1 relative">
@@ -695,7 +743,7 @@ const App: React.FC = () => {
                         className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors"
                         style={{ width: columnWidths['file'] || 300 }}
                     >
-                      File Name
+                      📄 论文文件
                       <div 
                         className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10"
                         onMouseDown={(e) => startResize(e, 'file')}
@@ -707,7 +755,7 @@ const App: React.FC = () => {
                         className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors"
                         style={{ width: columnWidths['tags'] || 160 }}
                     >
-                      Tags
+                      🏷️ 标签
                       <div 
                         className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10"
                         onMouseDown={(e) => startResize(e, 'tags')}
@@ -732,9 +780,9 @@ const App: React.FC = () => {
                     {/* Screenshot Header */}
                     <th 
                         className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors"
-                        style={{ width: columnWidths['screenshot'] || 150 }}
+                        style={{ width: columnWidths['screenshot'] || 200 }}
                     >
-                      Screenshots
+                      🖼️ 截图
                       <div 
                         className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10"
                         onMouseDown={(e) => startResize(e, 'screenshot')}
@@ -789,12 +837,12 @@ const App: React.FC = () => {
                                 {isAnalyzing && (
                                   <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-100/50">
                                     <span className="w-1 h-1 rounded-full bg-amber-500 animate-pulse"></span>
-                                    Processing
+                                    正在分析...
                                   </span>
                                 )}
                                 {isError && (
                                   <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-700 border border-red-100/50">
-                                    Failed
+                                    失败
                                   </span>
                                 )}
                                 {!isAnalyzing && !isError && (
@@ -803,11 +851,6 @@ const App: React.FC = () => {
                                     </span>
                                 )}
                               </div>
-                              {isError && (
-                                <p className="text-[10px] text-red-500 mt-1 truncate w-full">
-                                    {paper.errorMessage}
-                                </p>
-                              )}
                             </div>
                           </div>
                         </td>
@@ -826,7 +869,7 @@ const App: React.FC = () => {
                                     }}
                                     autoFocus
                                     className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs text-gray-900 shadow-sm focus:ring-1 focus:ring-indigo-500 outline-none"
-                                    placeholder="tag1, tag2..."
+                                    placeholder="标签1, 标签2..."
                                 />
                             ) : (
                                 <div 
@@ -847,7 +890,7 @@ const App: React.FC = () => {
                                         })
                                     ) : (
                                         <span className="text-gray-300 text-[10px] hover:text-gray-500 border border-transparent hover:border-gray-200 px-1 rounded transition-colors opacity-0 group-hover:opacity-100">
-                                            + add tag
+                                            + 添加标签
                                         </span>
                                     )}
                                 </div>
@@ -862,12 +905,11 @@ const App: React.FC = () => {
                             style={{ width: columnWidths[col.key] || 220 }}
                           >
                              <RenderCell
-                                paperId={paper.id}
+                                paper={paper}
                                 fieldKey={col.key}
                                 label={col.label}
                                 type={col.colType}
                                 content={paper.analysis ? (paper.analysis as any)[col.key] : ''}
-                                isLoading={isAnalyzing}
                              />
                           </td>
                         ))}
@@ -875,78 +917,42 @@ const App: React.FC = () => {
                         {/* Screenshot Column */}
                         <td 
                            className="p-3 align-top border-r border-gray-100"
-                           style={{ width: columnWidths['screenshot'] || 150 }}
+                           style={{ width: columnWidths['screenshot'] || 200 }}
                         >
-                            <div 
-                                tabIndex={0}
-                                onPaste={(e) => handlePaste(paper.id, e)}
-                                onDrop={(e) => {
-                                    e.preventDefault();
-                                    if (e.dataTransfer.files?.[0]) handleScreenshotUpload(paper.id, e.dataTransfer.files[0]);
-                                }}
-                                onDragOver={(e) => e.preventDefault()}
-                                className="w-full h-full min-h-[60px] outline-none"
-                            >
-                                {paper.screenshots && paper.screenshots.length > 0 ? (
-                                    <div className="grid grid-cols-2 gap-2">
-                                        {paper.screenshots.map((shot, idx) => (
-                                            <div key={idx} className="relative group/shot w-full aspect-square border border-gray-200 rounded overflow-hidden bg-gray-50">
-                                                <img 
-                                                    src={shot} 
-                                                    alt={`Screenshot ${idx + 1}`} 
-                                                    className="w-full h-full object-cover cursor-zoom-in hover:scale-105 transition-transform duration-200"
-                                                    onClick={() => setImageModal({ isOpen: true, url: shot })}
-                                                />
-                                                <button 
-                                                    onClick={(e) => { e.stopPropagation(); removeScreenshot(paper.id, idx); }}
-                                                    className="absolute top-0.5 right-0.5 p-0.5 bg-black/50 text-white rounded opacity-0 group-hover/shot:opacity-100 transition-opacity hover:bg-red-500"
-                                                    title="Remove image"
-                                                >
-                                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
-                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                                    </svg>
-                                                </button>
-                                            </div>
-                                        ))}
-                                        {/* Add Button Tile */}
-                                        <label className="flex items-center justify-center w-full aspect-square cursor-pointer border border-dashed border-gray-300 rounded hover:border-indigo-400 hover:bg-indigo-50 transition-colors bg-white text-gray-300 hover:text-indigo-400">
-                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
-                                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                            <div className="w-full h-full min-h-[60px] outline-none flex flex-wrap content-start gap-2">
+                                {paper.screenshots && paper.screenshots.length > 0 && paper.screenshots.map((shot, idx) => (
+                                    <div key={idx} className="relative group/shot w-[60px] h-[60px] border border-gray-200 rounded overflow-hidden bg-gray-50 flex-shrink-0">
+                                        <img 
+                                            src={shot} 
+                                            alt={`Screenshot ${idx + 1}`} 
+                                            className="w-full h-full object-cover cursor-zoom-in hover:scale-105 transition-transform duration-200"
+                                            onClick={() => setImageModal({ isOpen: true, url: shot })}
+                                        />
+                                        <button 
+                                            onClick={(e) => { e.stopPropagation(); removeScreenshot(paper.id, idx); }}
+                                            className="absolute top-0.5 right-0.5 p-0.5 bg-black/50 text-white rounded opacity-0 group-hover/shot:opacity-100 transition-opacity hover:bg-red-500"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                                             </svg>
-                                            <input 
-                                                type="file" 
-                                                accept="image/*" 
-                                                className="hidden" 
-                                                onChange={(e) => {
-                                                    if(e.target.files?.[0]) handleScreenshotUpload(paper.id, e.target.files[0]);
-                                                }}
-                                            />
-                                        </label>
+                                        </button>
                                     </div>
-                                ) : (
-                                    <>
-                                        <label className="flex flex-col items-center justify-center w-full h-full min-h-[60px] cursor-pointer p-2 rounded border border-dashed border-gray-200 bg-gray-50/50 hover:bg-white hover:border-indigo-300 transition-colors group/upload">
-                                            <span className="text-[10px] text-gray-400 group-hover/upload:text-indigo-500 transition-colors font-medium">Paste / Drop</span>
-                                            <input 
-                                                type="file" 
-                                                accept="image/*" 
-                                                className="hidden" 
-                                                onChange={(e) => {
-                                                    if(e.target.files?.[0]) handleScreenshotUpload(paper.id, e.target.files[0]);
-                                                }}
-                                            />
-                                        </label>
-                                    </>
-                                )}
+                                ))}
+                                
+                                {/* Always visible Add Button */}
+                                <label className="flex flex-col items-center justify-center w-[60px] h-[60px] cursor-pointer rounded border border-dashed border-gray-300 bg-gray-50 hover:bg-white hover:border-indigo-400 transition-all group/upload flex-shrink-0">
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 text-gray-400 group-hover/upload:text-indigo-500">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                                    </svg>
+                                    <input type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && handleScreenshotUpload(paper.id, e.target.files[0])} />
+                                </label>
                             </div>
                         </td>
 
-                        {/* Action Column */}
                         <td className="p-3 align-top text-center w-16">
                           <button
                             onClick={() => deletePaper(paper.id)}
-                            className="text-gray-300 hover:text-red-600 transition-colors p-1 rounded hover:bg-red-50"
-                            title="Remove paper"
+                            className="text-gray-300 hover:text-red-600 transition-colors p-1 rounded"
                           >
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
                               <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />

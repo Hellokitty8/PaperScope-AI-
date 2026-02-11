@@ -1,3 +1,4 @@
+
 export interface AnalysisResult {
   type: string;
   title: string;
@@ -8,6 +9,9 @@ export interface AnalysisResult {
   method: string;
   model_architecture: string;
   borrowable_ideas: string;
+  critique: string;
+  future_work: string;
+  mind_map: string;
 }
 
 export interface ComparisonResult {
@@ -83,5 +87,8 @@ export enum AnalysisColumn {
   METHOD = 'Method',
   MODEL = 'Model Arch',
   IDEAS = 'Key Ideas',
+  CRITIQUE = 'Critique',
+  FUTURE_WORK = 'Future Work',
+  MIND_MAP = 'Mind Map',
   SCREENSHOT = 'Screenshot'
 }

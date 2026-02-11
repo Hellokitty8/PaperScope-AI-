@@ -71,6 +71,9 @@ const DetailModal: React.FC<DetailModalProps> = ({
       case AnalysisColumn.MODEL: return '🏗️';
       case AnalysisColumn.CONTRIBUTION: return '🎁';
       case AnalysisColumn.IDEAS: return '✨';
+      case AnalysisColumn.CRITIQUE: return '⚖️';
+      case AnalysisColumn.FUTURE_WORK: return '🚀';
+      case AnalysisColumn.MIND_MAP: return '🧠';
       default: return '📄';
     }
   };
