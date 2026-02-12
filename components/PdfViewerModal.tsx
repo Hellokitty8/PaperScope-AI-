@@ -31,7 +31,10 @@ const PdfViewerModal: React.FC<PdfViewerModalProps> = ({ isOpen, onClose, paper,
   // PDF State
   const [numPages, setNumPages] = useState<number>(0);
   const [scale, setScale] = useState<number>(1.2);
+  const [fileData, setFileData] = useState<File | Blob | null>(null);
   const [fileUrl, setFileUrl] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [isLoadingFile, setIsLoadingFile] = useState<boolean>(false);
   
   // Highlight Data State
   const [highlights, setHighlights] = useState<Highlight[]>([]);
@@ -44,29 +47,61 @@ const PdfViewerModal: React.FC<PdfViewerModalProps> = ({ isOpen, onClose, paper,
 
   // Load paper data when opened
   useEffect(() => {
-    if (isOpen && paper) {
-      let url: string = '';
-      let isBlob = false;
-      
-      // Check if paper.file is string (URL) or Blob/File
-      if (typeof paper.file === 'string') {
-          url = paper.file;
-      } else {
-          url = URL.createObjectURL(paper.file);
-          isBlob = true;
+    if (!isOpen || !paper) return;
+
+    let isCancelled = false;
+    let objectUrl: string | null = null;
+
+    const loadFile = async () => {
+      setFileError(null);
+      setIsLoadingFile(true);
+
+      try {
+        let blob: Blob;
+
+        if (typeof paper.file === 'string') {
+          const fileUrl = paper.file.startsWith('http')
+            ? paper.file
+            : new URL(paper.file, window.location.origin).toString();
+          const response = await fetch(fileUrl);
+          if (!response.ok) {
+            throw new Error(`下载失败: ${response.status}`);
+          }
+          blob = await response.blob();
+          if (!blob || blob.size === 0) {
+            throw new Error('文件为空或损坏');
+          }
+        } else {
+          blob = paper.file;
+        }
+
+        if (isCancelled) return;
+        setFileData(blob);
+
+        objectUrl = URL.createObjectURL(blob);
+        setFileUrl(objectUrl);
+      } catch (err) {
+        if (isCancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setFileError(message || '无法加载 PDF');
+        setFileData(null);
+        setFileUrl(null);
+      } finally {
+        if (!isCancelled) setIsLoadingFile(false);
       }
-      
-      setFileUrl(url);
-      setHighlights(paper.highlights || []);
-      // Reset states
-      setActiveHighlightId(null);
-      setPopoverPosition(null);
-      setTempNote('');
-      
-      return () => {
-        if (isBlob) URL.revokeObjectURL(url);
-      };
-    }
+    };
+
+    loadFile();
+
+    setHighlights(paper.highlights || []);
+    setActiveHighlightId(null);
+    setPopoverPosition(null);
+    setTempNote('');
+
+    return () => {
+      isCancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
   }, [isOpen, paper]);
 
   useEffect(() => {
@@ -194,7 +229,7 @@ const PdfViewerModal: React.FC<PdfViewerModalProps> = ({ isOpen, onClose, paper,
       }
   };
 
-  if (!isOpen || !paper || !fileUrl) return null;
+  if (!isOpen || !paper) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -241,6 +276,19 @@ const PdfViewerModal: React.FC<PdfViewerModalProps> = ({ isOpen, onClose, paper,
 
              <div className="h-6 w-px bg-gray-300"></div>
 
+             {fileUrl && (
+               <a
+                 href={fileUrl}
+                 download={paper.fileName || 'paper.pdf'}
+                 className="flex items-center gap-2 px-3 py-2 bg-white text-gray-700 text-sm font-medium rounded-lg border border-gray-200 hover:bg-gray-50 shadow-sm transition-colors"
+               >
+                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v10m0 0l3-3m-3 3l-3-3M5 20h14" />
+                 </svg>
+                 Download PDF
+               </a>
+             )}
+
              <button
                 onClick={(e) => { e.stopPropagation(); handleSave(); }}
                 className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 shadow-sm transition-colors"
@@ -265,11 +313,21 @@ const PdfViewerModal: React.FC<PdfViewerModalProps> = ({ isOpen, onClose, paper,
             onMouseUp={handleTextSelection}
         >
           <Document
-            file={fileUrl}
+            file={fileData || undefined}
             onLoadSuccess={onDocumentLoadSuccess}
+            onLoadError={(err) => setFileError(err.message || '无法加载 PDF')}
             className="shadow-xl"
-            loading={<div className="flex items-center gap-2 text-gray-500 mt-20"><div className="w-6 h-6 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>Loading PDF...</div>}
-            error={<div className="text-red-500 bg-red-50 p-4 rounded-lg mt-10">Failed to load PDF. Check file format.</div>}
+            loading={
+              <div className="flex items-center gap-2 text-gray-500 mt-20">
+                <div className="w-6 h-6 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+                Loading PDF...
+              </div>
+            }
+            error={
+              <div className="text-red-500 bg-red-50 p-4 rounded-lg mt-10">
+                {fileError || 'Failed to load PDF. Check file format.'}
+              </div>
+            }
           >
              {Array.from(new Array(numPages), (el, index) => {
                  const pageNum = index + 1;
