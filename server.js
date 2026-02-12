@@ -4,8 +4,8 @@ const path = require('path');
 const fs = require('fs');
 const app = express();
 
-// Use a fixed port for local dev to match Vite proxy
-const PORT = 8080;
+// Use process.env.PORT for Cloud Run, fallback to 8080 for local
+const PORT = process.env.PORT || 8080;
 
 // Increase payload limit for base64 uploads (PDFs can be large)
 app.use(express.json({ limit: '500mb' }));
@@ -83,6 +83,13 @@ const setConfig = (config) => {
 // Health Check
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', storage: fs.existsSync(DB_PATH) ? 'writable' : 'error' });
+});
+
+// Config: Env (Provides API Key to frontend)
+app.get('/api/config/env', (req, res) => {
+    // SECURITY NOTE: This exposes the API Key to the client browser. 
+    // Necessary for the client-side Gemini SDK to function in this architecture.
+    res.json({ apiKey: process.env.API_KEY || "" });
 });
 
 // Get all papers

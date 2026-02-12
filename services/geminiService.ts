@@ -88,7 +88,7 @@ Task: 深度分析附件中的 PDF 论文，并提取以下信息：
 12. **mind_map**: **思维导图**。请以 **Markdown 层级列表** 的形式，总结这篇论文的核心内容，必须包含：研究问题、方法、结果、结论和贡献等关键要素。结构清晰，便于我构建脑图。
 
 **要求**:
-- 输出必须是严格的 **JSON** 格式。
+- 输出必须是严格的 **JSON**格式。
 - JSON 的 Key 必须严格使用小写英文：type, title, publication, problem, solution_idea, contribution, method, model_architecture, borrowable_ideas, critique, future_work, mind_map。
 - 所有内容必须使用 **简体中文 (Simplified Chinese)**。
 - 对于较长的解释（如问题、思路、方法、评估），请使用 **Markdown 列表** 来优化排版。
@@ -216,6 +216,24 @@ const normalizeKeys = (obj: any): AnalysisResult => {
     return newObj as AnalysisResult;
 };
 
+// Helper to get API Key (Env or Backend)
+const getApiKey = async (): Promise<string | undefined> => {
+    // 1. Check local env (Vite build time injection if configured, usually empty in docker)
+    if (process.env.API_KEY) return process.env.API_KEY;
+    
+    // 2. Fetch from backend (Runtime injection from Cloud Run)
+    try {
+        const res = await fetch('/api/config/env');
+        if (res.ok) {
+            const data = await res.json();
+            return data.apiKey;
+        }
+    } catch (e) {
+        console.warn("Could not fetch API key from backend");
+    }
+    return undefined;
+};
+
 export const analyzePaperWithGemini = async (file: File | Blob | string, settings?: LLMSettings): Promise<AnalysisResult> => {
   const base64Data = await processFileToBase64(file);
   const mimeType = 'application/pdf'; // We assume PDF for now based on app constraint
@@ -287,9 +305,9 @@ export const analyzePaperWithGemini = async (file: File | Blob | string, setting
   }
 
   // 2. Native Google Gemini Path (Default)
-  const apiKey = process.env.API_KEY;
+  const apiKey = await getApiKey();
   if (!apiKey) {
-    throw new Error("API Key not found. Please ensure process.env.API_KEY is set.");
+    throw new Error("API Key not found. Please ensure API_KEY is set in Cloud Run Variables.");
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -431,7 +449,7 @@ export const comparePapersWithGemini = async (papers: PaperData[], settings?: LL
         }
     }
 
-    const apiKey = process.env.API_KEY;
+    const apiKey = await getApiKey();
     if (!apiKey) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey });
     const modelName = settings?.model || "gemini-3-flash-preview";
