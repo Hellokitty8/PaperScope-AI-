@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Document, Page, pdfjs } from 'react-pdf';
+import { Document, Page, pdfjs } from 'react-pdf/dist/esm/entry.webpack';
 import { v4 as uuidv4 } from 'uuid';
 import { Highlight, PaperData } from '../types';
 
