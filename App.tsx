@@ -56,6 +56,14 @@ const getTagStyle = (tag: string) => {
   return TAG_COLORS[index];
 };
 
+type AnalysisTask = {
+  id: string;
+  file: File | Blob | string;
+  settings: LLMSettings;
+};
+
+const MAX_PARALLEL_ANALYSES = 2;
+
 const App: React.FC = () => {
   // Auth State
   const [currentUser, setCurrentUser] = useState<string | null>(() => {
@@ -123,6 +131,16 @@ const App: React.FC = () => {
   });
 
   const resizingRef = useRef<{ key: string; startX: number; startWidth: number } | null>(null);
+  const papersRef = useRef<PaperData[]>([]);
+  const syncInFlightRef = useRef<Set<string>>(new Set());
+  const syncPendingRef = useRef<Map<string, PaperData>>(new Map());
+  const analysisQueueRef = useRef<AnalysisTask[]>([]);
+  const analysisQueuedIdsRef = useRef<Set<string>>(new Set());
+  const activeAnalysisCountRef = useRef(0);
+
+  useEffect(() => {
+      papersRef.current = papers;
+  }, [papers]);
 
   // Health Check function
   const performHealthCheck = async () => {
@@ -149,37 +167,61 @@ const App: React.FC = () => {
         getPapersFromDB(currentUser).then(storedPapers => {
             const sorted = storedPapers.sort((a, b) => b.uploadTime - a.uploadTime);
             setPapers(sorted);
+            papersRef.current = sorted;
         });
     } else {
         setPapers([]);
+        papersRef.current = [];
     }
   }, [currentUser, isConnected]);
 
   // Helper to sync state to DB
   const syncPaperToDB = async (paper: PaperData) => {
-      if (!isConnected) {
-          // Try one quick check before failing
-          const healthy = await checkBackendHealth();
-          if (!healthy) {
-              setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, saveStatus: 'error' } : p));
-              return;
-          } else {
-              setIsConnected(true);
-          }
-      }
+      syncPendingRef.current.set(paper.id, paper);
+      if (syncInFlightRef.current.has(paper.id)) return;
 
-      setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, saveStatus: 'saving' } : p));
-      
+      syncInFlightRef.current.add(paper.id);
       try {
-          await savePaperToDB(paper);
-          setPapers(prev => prev.map(p => {
-              if (p.id !== paper.id) return p;
-              const storedFile = typeof p.file === 'string' ? p.file : `/api/files/${p.id}.pdf`;
-              return { ...p, file: storedFile, saveStatus: 'saved' };
-          }));
-      } catch (e) {
-          console.error("Sync failed for", paper.fileName, e);
-          setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, saveStatus: 'error' } : p));
+          while (true) {
+              const pendingPaper = syncPendingRef.current.get(paper.id);
+              if (!pendingPaper) break;
+              syncPendingRef.current.delete(paper.id);
+
+              let healthy = isConnected;
+              if (!healthy) {
+                  healthy = await checkBackendHealth();
+                  if (healthy) {
+                      setIsConnected(true);
+                  }
+              }
+
+              if (!healthy) {
+                  setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, saveStatus: 'error' } : p));
+                  continue;
+              }
+
+              setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, saveStatus: 'saving' } : p));
+
+              try {
+                  await savePaperToDB(pendingPaper);
+                  setPapers(prev => prev.map(p => {
+                      if (p.id !== paper.id) return p;
+                      const storedFile = typeof p.file === 'string' ? p.file : `/api/files/${p.id}.pdf`;
+                      return { ...p, file: storedFile, saveStatus: 'saved' };
+                  }));
+              } catch (e) {
+                  console.error("Sync failed for", pendingPaper.fileName, e);
+                  setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, saveStatus: 'error' } : p));
+              }
+          }
+      } finally {
+          syncInFlightRef.current.delete(paper.id);
+          if (syncPendingRef.current.has(paper.id)) {
+              const latestPaper = syncPendingRef.current.get(paper.id);
+              if (latestPaper) {
+                  void syncPaperToDB(latestPaper);
+              }
+          }
       }
   };
 
@@ -191,7 +233,37 @@ const App: React.FC = () => {
   const handleLogout = () => {
       setCurrentUser(null);
       localStorage.removeItem('paperScope_currentUser');
-      setPapers([]); 
+      setPapers([]);
+      papersRef.current = [];
+      analysisQueueRef.current = [];
+      analysisQueuedIdsRef.current.clear();
+      activeAnalysisCountRef.current = 0;
+      syncPendingRef.current.clear();
+      syncInFlightRef.current.clear();
+  };
+
+  const runAnalysisQueue = () => {
+      while (
+          activeAnalysisCountRef.current < MAX_PARALLEL_ANALYSES &&
+          analysisQueueRef.current.length > 0
+      ) {
+          const task = analysisQueueRef.current.shift();
+          if (!task) break;
+
+          activeAnalysisCountRef.current += 1;
+          void processPaper(task.id, task.file, task.settings).finally(() => {
+              activeAnalysisCountRef.current = Math.max(0, activeAnalysisCountRef.current - 1);
+              analysisQueuedIdsRef.current.delete(task.id);
+              runAnalysisQueue();
+          });
+      }
+  };
+
+  const enqueueAnalysis = (id: string, file: File | Blob | string, currentSettings: LLMSettings) => {
+      if (analysisQueuedIdsRef.current.has(id)) return;
+      analysisQueuedIdsRef.current.add(id);
+      analysisQueueRef.current.push({ id, file, settings: currentSettings });
+      runAnalysisQueue();
   };
 
   const handleBannerUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -256,37 +328,41 @@ const App: React.FC = () => {
       screenshots: [],
     }));
 
-    setPapers((prev) => [...newPapers, ...prev]); 
+    setPapers((prev) => {
+      const next = [...newPapers, ...prev];
+      papersRef.current = next;
+      return next;
+    });
     
     newPapers.forEach((paper) => {
-        processPaper(paper.id, paper.file, settings);
-        syncPaperToDB(paper);
+        enqueueAnalysis(paper.id, paper.file, settings);
+        void syncPaperToDB(paper);
     });
   };
 
   const processPaper = async (id: string, file: File | Blob | string, currentSettings: LLMSettings) => {
-    setPapers((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, status: 'analyzing', errorMessage: undefined } : p))
-    );
+    setPapers((prev) => {
+      const next = prev.map((p) => (p.id === id ? { ...p, status: 'analyzing', errorMessage: undefined } : p));
+      papersRef.current = next;
+      return next;
+    });
 
     try {
       const result = await analyzePaperWithGemini(file, currentSettings);
       
-      let updatedPaper: PaperData | null = null;
-      setPapers((prev) => {
-        return prev.map((p) => {
-            if (p.id === id) {
-                const updated = { ...p, status: 'success' as const, analysis: result, errorMessage: undefined };
-                updatedPaper = updated;
-                return updated;
-            }
-            return p;
-        });
-      });
-      
-      if (updatedPaper) {
-          syncPaperToDB(updatedPaper);
-      }
+      const latestPaper = papersRef.current.find(p => p.id === id);
+      if (!latestPaper) return;
+
+      const updatedPaper: PaperData = {
+        ...latestPaper,
+        status: 'success',
+        analysis: result,
+        errorMessage: undefined
+      };
+
+      setPapers((prev) => prev.map((p) => (p.id === id ? updatedPaper : p)));
+      papersRef.current = papersRef.current.map((p) => (p.id === id ? updatedPaper : p));
+      void syncPaperToDB(updatedPaper);
 
     } catch (error: any) {
       console.error(`Analysis failed for paper ${id}:`, error);
@@ -304,20 +380,18 @@ const App: React.FC = () => {
       else if (msg.includes("safety") || msg.includes("blocked")) friendlyError = "Content Blocked (Safety)";
       else if (msg.length > 0) friendlyError = error.message.length > 60 ? error.message.substring(0, 57) + "..." : error.message;
 
-      let updatedPaper: PaperData | null = null;
-      setPapers((prev) => {
-          return prev.map((p) => {
-            if (p.id === id) {
-                const updated = { ...p, status: 'error' as const, errorMessage: friendlyError };
-                updatedPaper = updated;
-                return updated;
-            }
-            return p;
-          });
-      });
-      if (updatedPaper) {
-          syncPaperToDB(updatedPaper);
-      }
+      const latestPaper = papersRef.current.find(p => p.id === id);
+      if (!latestPaper) return;
+
+      const updatedPaper: PaperData = {
+        ...latestPaper,
+        status: 'error',
+        errorMessage: friendlyError
+      };
+
+      setPapers((prev) => prev.map((p) => (p.id === id ? updatedPaper : p)));
+      papersRef.current = papersRef.current.map((p) => (p.id === id ? updatedPaper : p));
+      void syncPaperToDB(updatedPaper);
     }
   };
 
@@ -326,12 +400,16 @@ const App: React.FC = () => {
     if (!paper) return;
     
     // Trigger analysis again
-    processPaper(id, paper.file, settings);
+    enqueueAnalysis(id, paper.file, settings);
   };
 
   const deletePaper = (id: string) => {
     deletePaperFromDB(id);
     setPapers((prev) => prev.filter((p) => p.id !== id));
+    papersRef.current = papersRef.current.filter((p) => p.id !== id);
+    syncPendingRef.current.delete(id);
+    analysisQueueRef.current = analysisQueueRef.current.filter((task) => task.id !== id);
+    analysisQueuedIdsRef.current.delete(id);
     setSelectedPaperIds(prev => {
         const next = new Set(prev);
         next.delete(id);
