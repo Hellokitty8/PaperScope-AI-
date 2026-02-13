@@ -174,7 +174,8 @@ const App: React.FC = () => {
           await savePaperToDB(paper);
           setPapers(prev => prev.map(p => {
               if (p.id !== paper.id) return p;
-              return { ...p, saveStatus: 'saved' };
+              const storedFile = typeof p.file === 'string' ? p.file : `/api/files/${p.id}.pdf`;
+              return { ...p, file: storedFile, saveStatus: 'saved' };
           }));
       } catch (e) {
           console.error("Sync failed for", paper.fileName, e);
@@ -265,7 +266,7 @@ const App: React.FC = () => {
 
   const processPaper = async (id: string, file: File | Blob | string, currentSettings: LLMSettings) => {
     setPapers((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, status: 'analyzing' } : p))
+      prev.map((p) => (p.id === id ? { ...p, status: 'analyzing', errorMessage: undefined } : p))
     );
 
     try {
@@ -275,7 +276,7 @@ const App: React.FC = () => {
       setPapers((prev) => {
         return prev.map((p) => {
             if (p.id === id) {
-                const updated = { ...p, status: 'success' as const, analysis: result };
+                const updated = { ...p, status: 'success' as const, analysis: result, errorMessage: undefined };
                 updatedPaper = updated;
                 return updated;
             }
@@ -289,11 +290,25 @@ const App: React.FC = () => {
 
     } catch (error: any) {
       console.error(`Analysis failed for paper ${id}:`, error);
+
+      let friendlyError = "Analysis failed";
+      const msg = (error.message || "").toLowerCase();
+      
+      if (msg.includes("api key")) friendlyError = "Missing API Key";
+      else if (msg.includes("json") || msg.includes("parse") || msg.includes("unexpected token")) friendlyError = "Model returned invalid format";
+      else if (msg.includes("fetch") || msg.includes("network") || msg.includes("failed to fetch")) friendlyError = "Network connection failed";
+      else if (msg.includes("pdf") || msg.includes("file") || msg.includes("corrupt")) friendlyError = "Could not process PDF";
+      else if (msg.includes("429")) friendlyError = "Rate limit exceeded (429)";
+      else if (msg.includes("500") || msg.includes("503") || msg.includes("service")) friendlyError = "AI Service Unavailable";
+      else if (msg.includes("timeout")) friendlyError = "Request Timed Out";
+      else if (msg.includes("safety") || msg.includes("blocked")) friendlyError = "Content Blocked (Safety)";
+      else if (msg.length > 0) friendlyError = error.message.length > 60 ? error.message.substring(0, 57) + "..." : error.message;
+
       let updatedPaper: PaperData | null = null;
       setPapers((prev) => {
           return prev.map((p) => {
             if (p.id === id) {
-                const updated = { ...p, status: 'error' as const, errorMessage: error.message || 'Analysis failed' };
+                const updated = { ...p, status: 'error' as const, errorMessage: friendlyError };
                 updatedPaper = updated;
                 return updated;
             }
@@ -304,6 +319,14 @@ const App: React.FC = () => {
           syncPaperToDB(updatedPaper);
       }
     }
+  };
+
+  const retryAnalysis = (id: string) => {
+    const paper = papers.find(p => p.id === id);
+    if (!paper) return;
+    
+    // Trigger analysis again
+    processPaper(id, paper.file, settings);
   };
 
   const deletePaper = (id: string) => {
@@ -493,12 +516,12 @@ const App: React.FC = () => {
     if (isError) {
         if (fieldKey === 'type') {
              return (
-                 <div className="text-red-500 text-xs flex items-center gap-1 cursor-help" title={paper.errorMessage}>
-                     <span className="truncate">分析失败</span>
+                 <div className="text-red-500 text-[10px] flex items-center gap-1 opacity-70">
+                     <span className="truncate">See details ←</span>
                  </div>
              );
         }
-        return <span className="text-red-200 text-xs">-</span>;
+        return <span className="text-gray-200 text-xs">-</span>;
     }
 
     if (!content) return <span className="text-gray-300 text-xs italic cursor-pointer hover:text-gray-500 transition-colors" onClick={() => openDetail(paper.id, fieldKey, label, '', type)}>暂无内容</span>;
@@ -670,16 +693,33 @@ const App: React.FC = () => {
                               <p className="font-medium text-gray-900 hover:text-indigo-600 text-sm truncate w-full cursor-pointer transition-colors" onClick={() => openPdf(paper)}>
                                 {paper.fileName}
                               </p>
-                              <div className="flex items-center gap-2 mt-1">
+                              <div className="flex flex-col gap-1 mt-1">
                                 {isSaving && <span className="text-[10px] text-indigo-500 animate-pulse">☁️ 保存中...</span>}
                                 {saveFailed && <span className="text-[10px] text-red-500 font-bold" title="上传失败，刷新后数据将丢失">⚠️ 保存失败</span>}
                                 {isAnalyzing && (
-                                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-100/50">
+                                  <span className="inline-flex w-fit items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-100/50">
                                     <span className="w-1 h-1 rounded-full bg-amber-500 animate-pulse"></span>
                                     正在分析...
                                   </span>
                                 )}
-                                {isError && <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-700 border border-red-100/50">失败</span>}
+                                {isError && (
+                                    <div className="flex items-center gap-2 mt-1">
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-700 border border-red-100/50 max-w-[150px] truncate" title={paper.errorMessage}>
+                                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 shrink-0"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
+                                            {paper.errorMessage || "失败"}
+                                        </span>
+                                        <button 
+                                            onClick={(e) => { e.stopPropagation(); retryAnalysis(paper.id); }}
+                                            className="group/retry flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded transition-colors"
+                                            title="Retry Analysis"
+                                        >
+                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3 group-hover/retry:animate-spin">
+                                                <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                            </svg>
+                                            Retry
+                                        </button>
+                                    </div>
+                                )}
                                 {!isAnalyzing && !isError && (
                                     <span className="text-[10px] text-gray-400 font-mono">{(paper.fileSize / 1024 / 1024).toFixed(2)} MB</span>
                                 )}
