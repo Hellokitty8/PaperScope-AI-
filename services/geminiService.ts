@@ -1,6 +1,8 @@
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { AnalysisResult, LLMSettings, ComparisonResult, PaperData } from "../types";
 
+const blobBase64Cache = new WeakMap<Blob, Promise<string>>();
+
 // Helper: Convert File/Blob OR URL string to Base64 (pure data, no prefix)
 const processFileToBase64 = async (file: File | Blob | string): Promise<string> => {
   let blob: Blob;
@@ -18,7 +20,10 @@ const processFileToBase64 = async (file: File | Blob | string): Promise<string> 
       blob = file;
   }
 
-  return new Promise((resolve, reject) => {
+  const cached = blobBase64Cache.get(blob);
+  if (cached) return cached;
+
+  const conversionPromise = new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
       const result = reader.result as string;
@@ -32,6 +37,9 @@ const processFileToBase64 = async (file: File | Blob | string): Promise<string> 
     reader.onerror = (error) => reject(error);
     reader.readAsDataURL(blob);
   });
+
+  blobBase64Cache.set(blob, conversionPromise);
+  return conversionPromise;
 };
 
 const analysisSchemaProperties = {
@@ -216,22 +224,38 @@ const normalizeKeys = (obj: any): AnalysisResult => {
     return newObj as AnalysisResult;
 };
 
+let cachedApiKey: string | undefined;
+let apiKeyFetchPromise: Promise<string | undefined> | null = null;
+
 // Helper to get API Key (Env or Backend)
 const getApiKey = async (): Promise<string | undefined> => {
+    if (cachedApiKey) return cachedApiKey;
+    if (apiKeyFetchPromise) return apiKeyFetchPromise;
+
     // 1. Check local env (Vite build time injection if configured, usually empty in docker)
-    if (process.env.API_KEY) return process.env.API_KEY;
-    
-    // 2. Fetch from backend (Runtime injection from Cloud Run)
-    try {
-        const res = await fetch('/api/config/env');
-        if (res.ok) {
-            const data = await res.json();
-            return data.apiKey;
-        }
-    } catch (e) {
-        console.warn("Could not fetch API key from backend");
+    if (process.env.API_KEY) {
+        cachedApiKey = process.env.API_KEY;
+        return cachedApiKey;
     }
-    return undefined;
+
+    apiKeyFetchPromise = (async () => {
+        // 2. Fetch from backend (Runtime injection from Cloud Run)
+        try {
+            const res = await fetch('/api/config/env');
+            if (res.ok) {
+                const data = await res.json();
+                cachedApiKey = data.apiKey || undefined;
+                return cachedApiKey;
+            }
+        } catch (e) {
+            console.warn("Could not fetch API key from backend");
+        } finally {
+            apiKeyFetchPromise = null;
+        }
+        return undefined;
+    })();
+
+    return apiKeyFetchPromise;
 };
 
 export const analyzePaperWithGemini = async (file: File | Blob | string, settings?: LLMSettings): Promise<AnalysisResult> => {
