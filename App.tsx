@@ -500,6 +500,16 @@ const App: React.FC = () => {
           "Tags": p.tags?.join(', ') || '',
           "Type": p.analysis?.type || '',
           "Title": p.analysis?.title || '',
+          "Publication": p.analysis?.publication || '',
+          "Problem": p.analysis?.problem || '',
+          "Solution Idea": p.analysis?.solution_idea || '',
+          "Contribution": p.analysis?.contribution || '',
+          "Method": p.analysis?.method || '',
+          "Model Architecture": p.analysis?.model_architecture || '',
+          "Borrowable Ideas": p.analysis?.borrowable_ideas || '',
+          "Critique": p.analysis?.critique || '',
+          "Future Work": p.analysis?.future_work || '',
+          "Mind Map": p.analysis?.mind_map || '',
       }));
       const worksheet = XLSX.utils.json_to_sheet(data);
       const workbook = XLSX.utils.book_new();
