@@ -21,6 +21,14 @@ export const checkBackendHealth = async (): Promise<boolean> => {
 export const savePaperToDB = async (paper: PaperData) => {
   try {
     const serializablePaper: any = { ...paper };
+
+    // saveStatus is UI-only; do not persist it
+    delete serializablePaper.saveStatus;
+
+    // Avoid overwriting existing analysis with null/undefined
+    if (serializablePaper.analysis == null) {
+        delete serializablePaper.analysis;
+    }
     
     // Logic to handle file payload
     if (paper.file instanceof Blob) {
@@ -66,7 +74,12 @@ export const getPapersFromDB = async (_userId: string): Promise<PaperData[]> => 
     
     if (!response.ok) return [];
     const papers = await response.json();
-    return papers;
+    // saveStatus is UI-only; strip any persisted value
+    return papers.map((p: PaperData) => {
+        const cleaned = { ...p } as PaperData;
+        delete (cleaned as any).saveStatus;
+        return cleaned;
+    });
   } catch (error) {
     console.warn("Failed to fetch papers from Server:", error);
     return [];
