@@ -63,7 +63,7 @@ type AnalysisTask = {
 };
 
 const MAX_PARALLEL_ANALYSES = 2;
-const PAPERS_PER_PAGE = 9;
+const PAPERS_PER_PAGE = 8;
 
 const App: React.FC = () => {
   // Auth State
