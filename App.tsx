@@ -63,6 +63,7 @@ type AnalysisTask = {
 };
 
 const MAX_PARALLEL_ANALYSES = 2;
+const PAPERS_PER_PAGE = 9;
 
 const App: React.FC = () => {
   // Auth State
@@ -85,6 +86,7 @@ const App: React.FC = () => {
   
   // Grouping/Tagging State
   const [activeTab, setActiveTab] = useState<string>('All');
+  const [currentPage, setCurrentPage] = useState<number>(1);
   
   // Tag Editing State
   const [editingTagsId, setEditingTagsId] = useState<string | null>(null);
@@ -291,6 +293,36 @@ const App: React.FC = () => {
       return papers.filter(p => p.tags && p.tags.includes(activeTab));
   }, [papers, activeTab]);
 
+  const totalPages = useMemo(() => {
+      return Math.max(1, Math.ceil(filteredPapers.length / PAPERS_PER_PAGE));
+  }, [filteredPapers.length]);
+
+  const paginatedPapers = useMemo(() => {
+      const startIndex = (currentPage - 1) * PAPERS_PER_PAGE;
+      return filteredPapers.slice(startIndex, startIndex + PAPERS_PER_PAGE);
+  }, [filteredPapers, currentPage]);
+
+  const visiblePageNumbers = useMemo(() => {
+      const maxVisiblePages = 5;
+      if (totalPages <= maxVisiblePages) {
+          return Array.from({ length: totalPages }, (_, index) => index + 1);
+      }
+
+      let start = Math.max(1, currentPage - 2);
+      let end = Math.min(totalPages, start + maxVisiblePages - 1);
+      start = Math.max(1, end - maxVisiblePages + 1);
+
+      return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+  }, [currentPage, totalPages]);
+
+  useEffect(() => {
+      setCurrentPage(1);
+  }, [activeTab]);
+
+  useEffect(() => {
+      setCurrentPage(prev => Math.min(prev, totalPages));
+  }, [totalPages]);
+
   const getTagCount = (tagName: string) => {
       if (tagName === 'All') return papers.length;
       if (tagName === 'Uncategorized') return papers.filter(p => !p.tags || p.tags.length === 0).length;
@@ -430,19 +462,19 @@ const App: React.FC = () => {
   };
 
   const toggleAllSelection = () => {
-    const allFilteredIds = filteredPapers.map(p => p.id);
-    const allSelected = allFilteredIds.length > 0 && allFilteredIds.every(id => selectedPaperIds.has(id));
+    const allVisibleIds = paginatedPapers.map(p => p.id);
+    const allSelected = allVisibleIds.length > 0 && allVisibleIds.every(id => selectedPaperIds.has(id));
 
     if (allSelected) {
         setSelectedPaperIds(prev => {
             const next = new Set(prev);
-            allFilteredIds.forEach(id => next.delete(id));
+            allVisibleIds.forEach(id => next.delete(id));
             return next;
         });
     } else {
         setSelectedPaperIds(prev => {
             const next = new Set(prev);
-            allFilteredIds.forEach(id => next.add(id));
+            allVisibleIds.forEach(id => next.add(id));
             return next;
         });
     }
@@ -720,135 +752,218 @@ const App: React.FC = () => {
               <p className="text-sm text-gray-500 mt-1">请点击右下角按钮上传 PDF。</p>
             </div>
           ) : (
-            <div className="overflow-auto custom-scrollbar flex-1 relative">
-              <table className="w-full text-left border-collapse table-fixed">
-                <thead className="bg-gray-50 sticky top-0 z-20 shadow-sm border-b border-gray-200">
-                  <tr>
-                    <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 w-12 text-center" style={{ width: columnWidths['checkbox'] }}>
-                        <input type="checkbox" checked={filteredPapers.length > 0 && filteredPapers.every(p => selectedPaperIds.has(p.id))} onChange={toggleAllSelection} className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer" />
-                    </th>
-                    <th className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths['file'] || 300 }}>
-                      📄 论文文件
-                      <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, 'file')} />
-                    </th>
-                    <th className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths['tags'] || 160 }}>
-                      🏷️ 标签
-                      <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, 'tags')} />
-                    </th>
-                    {columns.map((col) => (
-                      <th key={col.label} className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths[col.key] || 220 }}>
-                        {col.label}
-                        <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, col.key)} />
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="overflow-auto custom-scrollbar flex-1 relative">
+                <table className="w-full text-left border-collapse table-fixed">
+                  <thead className="bg-gray-50 sticky top-0 z-20 shadow-sm border-b border-gray-200">
+                    <tr>
+                      <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 w-12 text-center" style={{ width: columnWidths['checkbox'] }}>
+                          <input type="checkbox" checked={paginatedPapers.length > 0 && paginatedPapers.every(p => selectedPaperIds.has(p.id))} onChange={toggleAllSelection} className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer" />
                       </th>
-                    ))}
-                    <th className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths['screenshot'] || 200 }}>
-                      🖼️ 截图
-                      <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, 'screenshot')} />
-                    </th>
-                    <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider w-16 text-center">...</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100 bg-white">
-                  {filteredPapers.map((paper) => {
-                    const isAnalyzing = paper.status === 'analyzing';
-                    const isError = paper.status === 'error';
-                    const isSaving = paper.saveStatus === 'saving';
-                    const saveFailed = paper.saveStatus === 'error';
-                    const isSelected = selectedPaperIds.has(paper.id);
-                    const isEditingTags = editingTagsId === paper.id;
-                    
-                    return (
-                      <tr key={paper.id} className={`hover:bg-gray-50/80 transition-colors group ${isSelected ? 'bg-indigo-50/30' : ''}`}>
-                         <td className="p-3 align-top text-center border-r border-gray-100" style={{ width: columnWidths['checkbox'] }}>
-                             <input type="checkbox" checked={isSelected} onChange={() => toggleSelection(paper.id)} className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer mt-1" />
-                         </td>
-                        <td className="p-3 align-top overflow-hidden border-r border-gray-100" style={{ width: columnWidths['file'] || 300 }}>
-                          <div className="flex items-start gap-3">
-                            <div className="mt-0.5 text-gray-400 shrink-0">
-                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
-                            </div>
-                            <div className="overflow-hidden w-full">
-                              <p className="font-medium text-gray-900 hover:text-indigo-600 text-sm truncate w-full cursor-pointer transition-colors" onClick={() => openPdf(paper)}>
-                                {paper.fileName}
-                              </p>
-                              <div className="flex flex-col gap-1 mt-1">
-                                {isSaving && <span className="text-[10px] text-indigo-500 animate-pulse">☁️ 保存中...</span>}
-                                {saveFailed && <span className="text-[10px] text-red-500 font-bold" title="上传失败，刷新后数据将丢失">⚠️ 保存失败</span>}
-                                {isAnalyzing && (
-                                  <span className="inline-flex w-fit items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-100/50">
-                                    <span className="w-1 h-1 rounded-full bg-amber-500 animate-pulse"></span>
-                                    正在分析...
-                                  </span>
-                                )}
-                                {isError && (
-                                    <div className="flex items-center gap-2 mt-1">
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-700 border border-red-100/50 max-w-[150px] truncate" title={paper.errorMessage}>
-                                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 shrink-0"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
-                                            {paper.errorMessage || "失败"}
-                                        </span>
-                                        <button 
-                                            onClick={(e) => { e.stopPropagation(); retryAnalysis(paper.id); }}
-                                            className="group/retry flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded transition-colors"
-                                            title="Retry Analysis"
-                                        >
-                                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3 group-hover/retry:animate-spin">
-                                                <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
-                                            </svg>
-                                            Retry
-                                        </button>
-                                    </div>
-                                )}
-                                {!isAnalyzing && !isError && (
-                                    <span className="text-[10px] text-gray-400 font-mono">{(paper.fileSize / 1024 / 1024).toFixed(2)} MB</span>
-                                )}
+                      <th className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths['file'] || 300 }}>
+                        📄 论文文件
+                        <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, 'file')} />
+                      </th>
+                      <th className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths['tags'] || 160 }}>
+                        🏷️ 标签
+                        <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, 'tags')} />
+                      </th>
+                      {columns.map((col) => (
+                        <th key={col.label} className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths[col.key] || 220 }}>
+                          {col.label}
+                          <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, col.key)} />
+                        </th>
+                      ))}
+                      <th className="relative p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider border-r border-gray-200/50 select-none group bg-gray-50 hover:bg-gray-100 transition-colors" style={{ width: columnWidths['screenshot'] || 200 }}>
+                        🖼️ 截图
+                        <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-500/50 z-10" onMouseDown={(e) => startResize(e, 'screenshot')} />
+                      </th>
+                      <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider w-16 text-center">...</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 bg-white">
+                    {paginatedPapers.map((paper) => {
+                      const isAnalyzing = paper.status === 'analyzing';
+                      const isError = paper.status === 'error';
+                      const isSaving = paper.saveStatus === 'saving';
+                      const saveFailed = paper.saveStatus === 'error';
+                      const isSelected = selectedPaperIds.has(paper.id);
+                      const isEditingTags = editingTagsId === paper.id;
+                      
+                      return (
+                        <tr key={paper.id} className={`hover:bg-gray-50/80 transition-colors group ${isSelected ? 'bg-indigo-50/30' : ''}`}>
+                           <td className="p-3 align-top text-center border-r border-gray-100" style={{ width: columnWidths['checkbox'] }}>
+                               <input type="checkbox" checked={isSelected} onChange={() => toggleSelection(paper.id)} className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer mt-1" />
+                           </td>
+                          <td className="p-3 align-top overflow-hidden border-r border-gray-100" style={{ width: columnWidths['file'] || 300 }}>
+                            <div className="flex items-start gap-3">
+                              <div className="mt-0.5 text-gray-400 shrink-0">
+                                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
+                              </div>
+                              <div className="overflow-hidden w-full">
+                                <p className="font-medium text-gray-900 hover:text-indigo-600 text-sm truncate w-full cursor-pointer transition-colors" onClick={() => openPdf(paper)}>
+                                  {paper.fileName}
+                                </p>
+                                <div className="flex flex-col gap-1 mt-1">
+                                  {isSaving && <span className="text-[10px] text-indigo-500 animate-pulse">☁️ 保存中...</span>}
+                                  {saveFailed && <span className="text-[10px] text-red-500 font-bold" title="上传失败，刷新后数据将丢失">⚠️ 保存失败</span>}
+                                  {isAnalyzing && (
+                                    <span className="inline-flex w-fit items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-100/50">
+                                      <span className="w-1 h-1 rounded-full bg-amber-500 animate-pulse"></span>
+                                      正在分析...
+                                    </span>
+                                  )}
+                                  {isError && (
+                                      <div className="flex items-center gap-2 mt-1">
+                                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-700 border border-red-100/50 max-w-[150px] truncate" title={paper.errorMessage}>
+                                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 shrink-0"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg>
+                                              {paper.errorMessage || "失败"}
+                                          </span>
+                                          <button 
+                                              onClick={(e) => { e.stopPropagation(); retryAnalysis(paper.id); }}
+                                              className="group/retry flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded transition-colors"
+                                              title="Retry Analysis"
+                                          >
+                                              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3 group-hover/retry:animate-spin">
+                                                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                              </svg>
+                                              Retry
+                                          </button>
+                                      </div>
+                                  )}
+                                  {!isAnalyzing && !isError && (
+                                      <span className="text-[10px] text-gray-400 font-mono">{(paper.fileSize / 1024 / 1024).toFixed(2)} MB</span>
+                                  )}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        </td>
-
-                        <td className="p-3 align-top border-r border-gray-100" style={{ width: columnWidths['tags'] || 160 }}>
-                            {isEditingTags ? (
-                                <input type="text" value={tempTagInput} onChange={(e) => setTempTagInput(e.target.value)} onBlur={() => saveTags(paper.id)} onKeyDown={(e) => { if (e.key === 'Enter') saveTags(paper.id); if (e.key === 'Escape') setEditingTagsId(null); }} autoFocus className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs text-gray-900 shadow-sm focus:ring-1 focus:ring-indigo-500 outline-none" placeholder="标签1, 标签2..." />
-                            ) : (
-                                <div onClick={() => startEditingTags(paper)} className="flex flex-wrap gap-1.5 cursor-text min-h-[24px] content-start">
-                                    {paper.tags && paper.tags.length > 0 ? (
-                                        paper.tags.map((tag, idx) => {
-                                            const style = getTagStyle(tag);
-                                            return <span key={idx} className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold border ${style.bg} ${style.text} ${style.border}`}>{tag}</span>;
-                                        })
-                                    ) : (
-                                        <span className="text-gray-300 text-[10px] hover:text-gray-500 border border-transparent hover:border-gray-200 px-1 rounded transition-colors opacity-0 group-hover:opacity-100">+ 添加标签</span>
-                                    )}
-                                </div>
-                            )}
-                        </td>
-                        {columns.map((col) => (
-                          <td key={`${paper.id}-${col.key}`} className="p-3 align-top border-r border-gray-100 overflow-hidden" style={{ width: columnWidths[col.key] || 220 }}>
-                             <RenderCell paper={paper} fieldKey={col.key} label={col.label} type={col.colType} content={paper.analysis ? (paper.analysis as any)[col.key] : ''} />
                           </td>
-                        ))}
-                        <td className="p-3 align-top border-r border-gray-100" style={{ width: columnWidths['screenshot'] || 200 }}>
-                            <div className="w-full h-full min-h-[60px] outline-none flex flex-wrap content-start gap-2">
-                                {paper.screenshots && paper.screenshots.length > 0 && paper.screenshots.map((shot, idx) => (
-                                    <div key={idx} className="relative group/shot w-[60px] h-[60px] border border-gray-200 rounded overflow-hidden bg-gray-50 flex-shrink-0">
-                                        <img src={shot} alt={`Screenshot ${idx + 1}`} className="w-full h-full object-cover cursor-zoom-in hover:scale-105 transition-transform duration-200" onClick={() => setImageModal({ isOpen: true, url: shot })} />
-                                        <button onClick={(e) => { e.stopPropagation(); removeScreenshot(paper.id, idx); }} className="absolute top-0.5 right-0.5 p-0.5 bg-black/50 text-white rounded opacity-0 group-hover/shot:opacity-100 transition-opacity hover:bg-red-500"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></button>
-                                    </div>
-                                ))}
-                                <label className="flex flex-col items-center justify-center w-[60px] h-[60px] cursor-pointer rounded border border-dashed border-gray-300 bg-gray-50 hover:bg-white hover:border-indigo-400 transition-all group/upload flex-shrink-0">
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 text-gray-400 group-hover/upload:text-indigo-500"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-                                    <input type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && handleScreenshotUpload(paper.id, e.target.files[0])} />
-                                </label>
-                            </div>
-                        </td>
-                        <td className="p-3 align-top text-center w-16">
-                          <button onClick={() => deletePaper(paper.id)} className="text-gray-300 hover:text-red-600 transition-colors p-1 rounded"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg></button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+
+                          <td className="p-3 align-top border-r border-gray-100" style={{ width: columnWidths['tags'] || 160 }}>
+                              {isEditingTags ? (
+                                  <input type="text" value={tempTagInput} onChange={(e) => setTempTagInput(e.target.value)} onBlur={() => saveTags(paper.id)} onKeyDown={(e) => { if (e.key === 'Enter') saveTags(paper.id); if (e.key === 'Escape') setEditingTagsId(null); }} autoFocus className="w-full bg-white border border-indigo-300 rounded px-2 py-1 text-xs text-gray-900 shadow-sm focus:ring-1 focus:ring-indigo-500 outline-none" placeholder="标签1, 标签2..." />
+                              ) : (
+                                  <div onClick={() => startEditingTags(paper)} className="flex flex-wrap gap-1.5 cursor-text min-h-[24px] content-start">
+                                      {paper.tags && paper.tags.length > 0 ? (
+                                          paper.tags.map((tag, idx) => {
+                                              const style = getTagStyle(tag);
+                                              return <span key={idx} className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-semibold border ${style.bg} ${style.text} ${style.border}`}>{tag}</span>;
+                                          })
+                                      ) : (
+                                          <span className="text-gray-300 text-[10px] hover:text-gray-500 border border-transparent hover:border-gray-200 px-1 rounded transition-colors opacity-0 group-hover:opacity-100">+ 添加标签</span>
+                                      )}
+                                  </div>
+                              )}
+                          </td>
+                          {columns.map((col) => (
+                            <td key={`${paper.id}-${col.key}`} className="p-3 align-top border-r border-gray-100 overflow-hidden" style={{ width: columnWidths[col.key] || 220 }}>
+                               <RenderCell paper={paper} fieldKey={col.key} label={col.label} type={col.colType} content={paper.analysis ? (paper.analysis as any)[col.key] : ''} />
+                            </td>
+                          ))}
+                          <td className="p-3 align-top border-r border-gray-100" style={{ width: columnWidths['screenshot'] || 200 }}>
+                              <div className="w-full h-full min-h-[60px] outline-none flex flex-wrap content-start gap-2">
+                                  {paper.screenshots && paper.screenshots.length > 0 && paper.screenshots.map((shot, idx) => (
+                                      <div key={idx} className="relative group/shot w-[60px] h-[60px] border border-gray-200 rounded overflow-hidden bg-gray-50 flex-shrink-0">
+                                          <img src={shot} alt={`Screenshot ${idx + 1}`} className="w-full h-full object-cover cursor-zoom-in hover:scale-105 transition-transform duration-200" onClick={() => setImageModal({ isOpen: true, url: shot })} />
+                                          <button onClick={(e) => { e.stopPropagation(); removeScreenshot(paper.id, idx); }} className="absolute top-0.5 right-0.5 p-0.5 bg-black/50 text-white rounded opacity-0 group-hover/shot:opacity-100 transition-opacity hover:bg-red-500"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></button>
+                                      </div>
+                                  ))}
+                                  <label className="flex flex-col items-center justify-center w-[60px] h-[60px] cursor-pointer rounded border border-dashed border-gray-300 bg-gray-50 hover:bg-white hover:border-indigo-400 transition-all group/upload flex-shrink-0">
+                                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5 text-gray-400 group-hover/upload:text-indigo-500"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+                                      <input type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && handleScreenshotUpload(paper.id, e.target.files[0])} />
+                                  </label>
+                              </div>
+                          </td>
+                          <td className="p-3 align-top text-center w-16">
+                            <button onClick={() => deletePaper(paper.id)} className="text-gray-300 hover:text-red-600 transition-colors p-1 rounded"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg></button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="border-t border-gray-200 bg-white px-4 py-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <p className="text-xs text-gray-500">
+                  第 {filteredPapers.length === 0 ? 0 : currentPage} / {filteredPapers.length === 0 ? 0 : totalPages} 页 · 共 {filteredPapers.length} 篇
+                </p>
+                <div className="flex items-center gap-1 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage(1)}
+                    disabled={currentPage === 1 || filteredPapers.length === 0}
+                    className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-gray-300 text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    首页
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                    disabled={currentPage === 1 || filteredPapers.length === 0}
+                    className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-gray-300 text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    上一页
+                  </button>
+
+                  {filteredPapers.length > 0 && visiblePageNumbers[0] > 1 && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setCurrentPage(1)}
+                        className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-gray-300 text-gray-600 bg-white hover:bg-gray-50"
+                      >
+                        1
+                      </button>
+                      {visiblePageNumbers[0] > 2 && <span className="px-1 text-xs text-gray-400">...</span>}
+                    </>
+                  )}
+
+                  {filteredPapers.length > 0 && visiblePageNumbers.map((page) => (
+                    <button
+                      key={page}
+                      type="button"
+                      onClick={() => setCurrentPage(page)}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md border transition-colors ${
+                        page === currentPage
+                          ? 'border-indigo-600 bg-indigo-600 text-white'
+                          : 'border-gray-300 text-gray-600 bg-white hover:bg-gray-50'
+                      }`}
+                    >
+                      {page}
+                    </button>
+                  ))}
+
+                  {filteredPapers.length > 0 && visiblePageNumbers[visiblePageNumbers.length - 1] < totalPages && (
+                    <>
+                      {visiblePageNumbers[visiblePageNumbers.length - 1] < totalPages - 1 && <span className="px-1 text-xs text-gray-400">...</span>}
+                      <button
+                        type="button"
+                        onClick={() => setCurrentPage(totalPages)}
+                        className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-gray-300 text-gray-600 bg-white hover:bg-gray-50"
+                      >
+                        {totalPages}
+                      </button>
+                    </>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                    disabled={currentPage === totalPages || filteredPapers.length === 0}
+                    className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-gray-300 text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    下一页
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage(totalPages)}
+                    disabled={currentPage === totalPages || filteredPapers.length === 0}
+                    className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-gray-300 text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    末页
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
